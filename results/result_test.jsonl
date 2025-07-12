@@ -1,0 +1,4 @@
+{"user_id": "11", "personal_info": {"region": "四川", "fans_count": 298327}, "network_info": {"degree": 2, "global_betweenness": 0.0, "global_degree_centrality": 1.0}, "ego_network_info": {"clustering_coefficient": 1.0, "density": 1.0, "average_nearest_neighbor_degree": 2.0}}
+{"user_id": "22", "personal_info": {"region": "江苏", "fans_count": 59}, "network_info": {"degree": 2, "global_betweenness": 0.0, "global_degree_centrality": 1.0}, "ego_network_info": {"clustering_coefficient": 1.0, "density": 1.0, "average_nearest_neighbor_degree": 2.0}}
+{"user_id": "33", "personal_info": {"region": "上海", "fans_count": 421747}, "network_info": {"degree": 2, "global_betweenness": 0.0, "global_degree_centrality": 1.0}, "ego_network_info": {"clustering_coefficient": 1.0, "density": 1.0, "average_nearest_neighbor_degree": 2.0}}
+{"user_id": "", "personal_info": {"region": "", "fans_count": 0}, "network_info": {}, "ego_network_info": {}}

@@ -1,0 +1,14 @@
+# 排除大型CSV文件 
+data/3人伪造老干妈印章与腾讯签合同被刑拘.csv 
+*.csv 
+ 
+# 排除helper目录 
+helper/ 
+ 
+# 排除zip文件中的结果 
+zip/ 
+ 
+# 排除临时文件 
+__pycache__/ 
+*.pyc 
+.DS_Store 
