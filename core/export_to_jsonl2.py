@@ -26,7 +26,9 @@ def export_users_to_jsonl(csv_path, jsonl_path):
         reader = csv.DictReader(f_in)
         for row in reader:
             user_id = row.get("MD5-作者ID", "").strip()
+            # 确保遍历所有csv中出现的用户，如果已经记录过，则跳过
             if user_id not in user_info:
+                # 记录用户的个人信息
                 user_info[user_id] = {
                     "user_id": user_id,
                     "personal_info": {
@@ -37,6 +39,7 @@ def export_users_to_jsonl(csv_path, jsonl_path):
                     "network_info": {},
                     "ego_network_info": {}
                 }
+                # 如果用户在社交网络图中存在，则计算其网络指标
                 if user_id in social_graph.nodes:
                     net_info = {}
                     net_info["degree"] = degree_map[user_id]
@@ -54,13 +57,13 @@ def export_users_to_jsonl(csv_path, jsonl_path):
                     # print(f"Processing user {user_id}: {progress:.2f}% completed")
 
                     ego_info = {}
-                    if len(ego_net.nodes) > 1:
+                    if len(ego_net.nodes) > 1: # 如果ego network中有超过一个节点
                         # 已有指标
                         ego_info["clustering_coefficient"] = eg_f.clustering(ego_net, user_id)
                         ego_info["density"] = eg.density(ego_net)
-                        ego_info["average_nearest_neighbor_degree"] = calculate_average_neighbor_degree(ego_net)
+                        ego_info["average_nearest_neighbor_degree"] = calculate_average_neighbor_degree(ego_net, user_id)
                         # 新增局部介数中心性
-                        bc_list = eg_f.betweenness_centrality(ego_net)
+                        bc_list = eg_f.betweenness_centrality(ego_net) # 这里计算的事实上是邻居网络中每个节点的介数中心性
                         ego_nodes = list(ego_net.nodes) # 获取ego network中的节点，set转为list
                         # 若中心节点存在于 ego network 中，则取其对应的介数中心性，否则记为0
                         if user_id in ego_nodes:
@@ -80,7 +83,7 @@ def export_users_to_jsonl(csv_path, jsonl_path):
                 f_out.write(json.dumps(user_info[user_id], ensure_ascii=False) + "\n")
 
 if __name__ == "__main__":
-    csv_file = "./data/3人伪造老干妈印章与腾讯签合同被刑拘.csv"   # 从 data 文件夹读取         
-    output_file = "./results/result_big.jsonl"
+    csv_file = "./data/《网络直播营销活动行为规范》7月1日实施.csv"   # 从 data 文件夹读取         
+    output_file = "./results/result1.jsonl"
     export_users_to_jsonl(csv_file, output_file)
     print("JSONL 文件导出完成！")
