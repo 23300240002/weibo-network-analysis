@@ -23,22 +23,17 @@ def build_social_network_from_csv(csv_path):
                 G.add_edge(author_id, parent_author_id)
     return G
 
-def calculate_average_neighbor_degree(G):
+# 计算图中某个（中心）节点的平均邻居度
+def calculate_average_neighbor_degree(G, center_node):
+    """计算中心节点的平均邻居度"""
     degree_map = G.degree()
-    total_neighbor_degree = 0
-    count = 0
-    for node in G.nodes:
-        neighbors = list(G.neighbors(node))
-        if neighbors:
-            neighbor_degs = [degree_map[neigh] for neigh in neighbors]
-            avg_deg = sum(neighbor_degs) / len(neighbor_degs)
-            total_neighbor_degree += avg_deg
-            count += 1
-    if count == 0:
+    neighbors = list(G.neighbors(center_node))
+    if not neighbors:
         return 0
-    return total_neighbor_degree / count
+    neighbor_degs = [degree_map[neigh] for neigh in neighbors]
+    return sum(neighbor_degs) / len(neighbor_degs)
 
-# 计算图的各项指标
+# 计算图的各项基础指标
 def compute_graph_metrics(G):
     metrics = {}
     metrics["节点数"] = len(G.nodes)
