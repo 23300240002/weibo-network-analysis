@@ -1,229 +1,170 @@
 # 微博用户邻居网络与其发布内容影响力的关联研究
 
-本项目研究微博用户邻居网络的结构特征与其发布内容流行度之间的关联关系，通过构建用户的社交网络和邻居网络，提取网络特征，并利用因果森林模型分析网络结构对内容流行度的影响机制。
+本项目旨在研究微博用户邻居网络的结构特征与其发布内容流行度之间的关系。通过自动化爬取微博用户的关注网络，提取用户的二跳邻居网络（Ego Network）结构指标，并结合用户内容的流行度，探索网络结构对用户影响力的作用机制。
+
+---
 
 ## 项目结构
 
 ```
 data/
-├── core/                   # 核心代码目录
-│   ├── network.py          # 社交网络构建与分析基础函数
-│   ├── export_to_jsonl2.py # 提取用户网络特征并导出为JSONL
-│   ├── calculate_popularity.py # 计算微博流行度指标
-│   ├── casual_forest_analysis.py # 因果森林分析模型
-│   └── predict_popularity.py # 流行度预测模型
-├── data/                   # 原始数据目录
+├── core/                        # 核心分析代码
+│   ├── new_analysis.py          # 最新的网络指标与流行度相关性分析主脚本
+│   └── process_following_network.py # 网络整体结构与可见性分析脚本
+├── crawler/                     # 网络数据采集与处理
+│   ├── weiboSpider/             # 配置文件（如config.json，存放cookie和用户ID列表）
+│   ├── fetch_following.py       # 主爬虫脚本，自动化爬取指定用户的二跳关注网络
+│   ├── merge_networks.py        # 合并多个用户网络为大网络
+│   └── refind_missed_users.py   # 检查并补全网络中“没有出边”的用户（修复漏爬/隐私用户）
+├── old/                         # 历史代码归档
+│   ├── before_2025_07/          # 2025年7月前的第一轮自我探索旧代码（已弃用）
+│   ├── 2025_07_first_try/       # 2025年7月对旧结果的检查与评判代码（与当前主流程无关）
+│   └── test/                    # 各类测试脚本
+├── data/                        # 原始微博CSV数据
 │   ├── 《网络直播营销活动行为规范》7月1日实施.csv # 微博数据集示例
-│   └── ...                 # 其他CSV数据集
-├── results/                # 处理结果目录
-│   ├── result.jsonl        # 包含完整特征的用户网络特征数据
-│   ├── result1.jsonl       # 另一个网络特征数据集
-│   └── popularity.jsonl    # 微博流行度数据
-└── old/                    # 旧版代码和测试文件（仅作参考）
+│   └── ...                      # 其他原始微博数据
+├── results/                     # 处理结果目录
+│   ├── merged_network_results1/ # 最早爬取的大网络及其指标结果
+│   ├── network_analysis/        # 各网络结构分析与可见性分析结果
+│   └── old_results/             # 历史分析结果归档
 ```
 
-## 数据说明
+---
 
-### 原始数据
-本项目使用微博公开数据集，存储为CSV格式，每条记录包含：
-- 作者ID（MD5加密）
-- 父微博ID及其作者ID
-- 内容标题、发布地区
-- 粉丝数
-- 转发/点赞/评论数量
-- 原创/转发标记
+## 各目录与主要脚本功能说明
 
-### 处理后数据
-处理后的数据以JSONL格式存储，包含：
+### core
 
-1. **用户网络特征数据** (`result.jsonl`):
-   ```json
-   {
-     "user_id": "hash值",
-     "personal_info": {
-       "region": "地区",
-       "fans_count": 粉丝数,
-       "total_posts": 发帖总数
-     },
-     "network_info": {
-       "degree": 度,
-       "global_betweenness": 全局介数中心性,
-       "global_degree_centrality": 全局度中心性
-     },
-     "ego_network_info": {
-       "clustering_coefficient": 聚类系数,
-       "density": 密度,
-       "average_nearest_neighbor_degree": 邻居平均度,
-       "ego_betweenness": 局部介数中心性
-     }
-   }
-   ```
+- **new_analysis.py**  
+  最新的网络指标与流行度相关性分析主脚本。自动加载合并后的大网络数据，计算每个用户的二跳邻居网络（Ego Network）六大结构指标，并与用户内容流行度进行相关性分析，输出统计结果和可视化图表。
 
-2. **流行度数据** (`popularity.jsonl`):
-   ```json
-   {
-     "user_id": "hash值",
-     "is_retweet": true/false,
-     "popularity": 流行度值
-   }
-   ```
+- **process_following_network.py**  
+  对每个用户网络及合并网络整体结构进行分析，包括节点数、边数、度分布、网络密度、聚类系数、可见性（如没有出边的用户比例）等，输出详细的结构分析报告。
 
-## 处理流程
+- 其他脚本（如network.py、export_to_jsonl2.py等）为早期特征提取与分析方案，已被new_analysis.py等替代。
 
-1. **社交网络构建**：基于微博用户间的转发关系，构建无向图
-2. **特征提取**：计算每个用户的邻居网络特征与全局网络指标
-3. **流行度计算**：聚合每条微博的转发、点赞、评论数作为流行度指标
-4. **因果分析**：使用因果森林模型分析网络特征对流行度的因果效应
-5. **预测建模**：构建随机森林模型预测内容流行度
+### crawler
 
-## 核心脚本说明
+- **weiboSpider/**  
+  存放配置文件（如config.json），需在此文件中填写cookie和要爬取的用户ID列表。
 
-### network.py
-提供社交网络构建与分析的基础函数。
+- **fetch_following.py**  
+  主爬虫脚本。根据config.json中的cookie和用户ID，自动化爬取指定用户的二跳关注网络，保存用户、边、流行度等数据。用户流行度目前的算法为发布所有帖子的转赞评平均值。支持断点续爬和反爬检测。
 
-**主要功能**：
-- `build_social_network_from_csv(csv_path)`: 从CSV文件构建社交网络图
-- `calculate_average_neighbor_degree(G)`: 计算图中节点的平均邻居度
-- `compute_graph_metrics(G)`: 计算整个图的统计指标（节点数、边数、平均度等）
-- `compute_global_centrality(G, node)`: 计算节点的全局介数中心性
-- `compute_global_degree_centrality(G, node)`: 计算节点的全局度中心性
+- **refind_missed_users.py**  
+  检查网络中“没有出边”的用户，自动补全因漏爬或隐私导致的缺失关注关系，提升网络数据完整性。
 
-**输入**：微博CSV数据文件
-**输出**：社交网络图对象(EasyGraph Graph)
+- **merge_networks.py**  
+  合并多个用户的网络数据（用户、边、流行度、节点类别）为一个大网络，便于后续整体分析。
 
-### export_to_jsonl2.py
-提取用户网络特征并导出为JSONL格式。
+### old
 
-**主要功能**：
-- 从CSV数据构建社交网络
-- 提取每个用户的个人信息
-- 构建Ego Network并计算网络指标
-- 将结果保存为JSONL格式
+- **before_2025_07/**  
+  2025年7月前的第一轮自我探索旧代码，已弃用。
 
-**输入**：微博CSV数据文件
-**输出**：包含用户网络特征的JSONL文件(`result.jsonl`)
+- **2025_07_first_try/**  
+  2025年7月对旧结果的检查与评判代码，与当前主流程无关。
 
-### calculate_popularity.py
-计算每条微博的流行度指标。
+- **test/**  
+  存放各类测试脚本。
 
-**主要功能**：
-- 从CSV数据中提取每条微博的作者ID、转发状态
-- 计算流行度（转发+点赞+评论数量）
-- 将结果保存为JSONL格式
+### data
 
-**输入**：微博CSV数据文件
-**输出**：包含流行度指标的JSONL文件(`popularity.jsonl`)
+- 存放原始微博CSV数据，每条记录包含作者ID、父微博ID、内容、地区、粉丝数、转发/点赞/评论数、原创/转发标记等。
 
-### casual_forest_analysis.py
-使用因果森林模型分析网络特征对流行度的因果效应。
+### results
 
-**主要功能**：
-- 合并用户网络特征与流行度数据
-- 提取解释变量（聚类系数、密度、邻居平均度、局部介数中心性）
-- 控制混淆变量（全局度、是否转发、粉丝数、发帖总数）
-- 利用CausalForestDML模型估计局部平均处理效应
-- 可视化因果效应分布
+- **merged_network_results1/**  
+  存储第一轮实验最先爬取的大网络及其各类指标分析结果。为目前最新。
 
-**输入**：
-- 用户网络特征数据(`result.jsonl`)
-- 流行度数据(`popularity.jsonl`)
+- **network_analysis/**  
+  存放各网络结构分析、可见性分析等结果报告。
 
-**输出**：
-- 平均因果效应值
-- 因果效应分布图
+- **old_results/**  
+  历史分析结果归档。
 
-**关键解释变量**：
-- `clustering_coefficient`: 聚类系数，衡量邻居间连接的紧密程度
-- `density`: 网络密度，反映邻居间实际边数与理论最大边数的比例
-- `average_nearest_neighbor_degree`: 邻居平均度，表征邻居节点的平均连接数
-- `ego_betweenness`: 局部介数中心性，评估用户在邻居网络中的桥梁作用
+---
 
-**混淆变量**：
-- `global_degree`: 用户在全局网络中的度
-- `is_retweet_num`: 是否为转发内容
-- `fans_count`: 粉丝数量
-- `total_posts`: 发帖总数
+## 使用方法与流程
 
-### predict_popularity.py
-构建随机森林模型预测内容流行度。
+### 1. 准备工作
 
-**主要功能**：
-- 合并用户网络特征与流行度数据
-- 提取预测特征（包括网络指标和用户属性）
-- 构建随机森林回归模型
-- 评估模型性能（MSE、R²）
-- 使用SHAP分析特征重要性
+- **获取微博cookie**：需有微博账号，登录后在浏览器开发者工具中获取cookie，并填写到`crawler/weiboSpider/config.json`的`cookie`字段。
+- **指定要爬取的用户**：在`config.json`的`user_id_list`字段中填写目标用户ID（可多个）。
 
-**输入**：
-- 用户网络特征数据(`result.jsonl`)
-- 流行度数据(`popularity.jsonl`)
+### 2. 网络数据采集
 
-**输出**：
-- 模型性能指标
-- 特征重要性分析
-- 预测值与实际值对比图
+- **运行主爬虫**  
+  在终端执行：
+  ```bash
+  python crawler/fetch_following.py
+  ```
+  功能：自动爬取config.json中所有用户的二跳关注网络，保存每个用户的用户表、边表、流行度表、节点类别等数据。支持断点续爬和反爬检测。
 
-## 结果分析
+- **补全缺失关注关系（可选）**  
+  若需补全网络中“没有出边”的用户（如因隐私或漏爬），可运行：
+  ```bash
+  python crawler/refind_missed_users.py
+  ```
+  功能：自动检查并补全ABC类用户的关注列表，提升网络完整性。
 
-本项目通过因果森林分析和预测模型，探索了几个关键发现：
+### 3. 网络合并（如需整体分析）
 
-1. **网络特征的因果效应**：
-   - 分析了聚类系数、密度、邻居平均度和局部介数中心性对内容流行度的因果影响
-   - 通过控制混淆变量，揭示了网络结构特征的独立效应
+- **合并多个用户网络**  
+  若需将多个用户的网络合并为大网络，运行：
+  ```bash
+  python crawler/merge_networks.py
+  ```
+  功能：自动合并所有用户的用户表、边表、流行度表、节点类别，生成合并后的大网络数据。
 
-2. **预测模型性能**：
-   - 使用随机森林模型预测内容流行度
-   - 评估模型性能并分析特征重要性
+### 4. 网络结构与可见性分析
 
-3. **特征交互**：
-   - 通过SHAP分析揭示了网络特征与用户属性间的交互影响
+- **分析网络整体结构**  
+  可对每个用户网络及合并网络进行结构分析，运行：
+  ```bash
+  python core/process_following_network.py
+  ```
+  功能：输出节点数、边数、度分布、网络密度、聚类系数、没有出边的用户比例等结构性报告，辅助理解网络质量与可见性问题。
 
-## 使用示例
+### 5. 网络指标与流行度相关性分析
 
-### 从CSV数据构建社交网络并提取特征
+- **分析二跳邻居网络结构与流行度的关系**  
+  运行：
+  ```bash
+  python core/new_analysis.py
+  ```
+  功能：对合并网络中每个用户，自动提取其二跳邻居网络（Ego Network），高效计算六大结构指标，并与用户内容流行度进行相关性分析，输出统计结果与可视化图表。
 
-```python
-# 构建社交网络
-from core.network import build_social_network_from_csv
-social_graph = build_social_network_from_csv("./data/微博数据.csv")
+---
 
-# 提取网络特征并保存
-from core.export_to_jsonl2 import export_users_to_jsonl
-export_users_to_jsonl("./data/微博数据.csv", "./results/result.jsonl")
+## 研究变量说明
 
-# 计算流行度指标
-from core.calculate_popularity import calculate_popularity
-calculate_popularity("./data/微博数据.csv", "./results/popularity.jsonl")
-```
+- **自变量X：二跳邻居网络六大结构指标**  
+  主要通过EasyGraph高效计算，具体包括：
+  1. **density（密度）**：邻居间实际边数与理论最大边数的比值，反映网络紧密程度。
+  2. **clustering_coefficient（聚类系数）**：衡量邻居间互相连接的紧密程度。
+  3. **average_nearest_neighbor_degree（邻居平均度）**：邻居节点的平均连接数，反映用户周围的活跃度。
+  4. **ego_betweenness（局部介数中心性）**：用户在其邻居网络中的桥梁作用。
+  5. **spectral_radius（谱半径）**：邻居网络的最大特征值，反映结构复杂性。
+  6. **modularity（模块度）**：社区划分的紧密度，反映网络的社区结构明显性。
 
-### 进行因果分析
+- **因变量Y：内容流行度**  
+  以用户内容的转发、点赞、评论总数（转赞评）为基础，计算平均流行度（avg_popularity）作为用户影响力的衡量。
 
-```python
-# 运行因果森林分析
-from core.casual_forest_analysis import run_causal_forest_analysis
-# 脚本会自动加载result.jsonl和popularity.jsonl文件
-# 并针对每个解释变量进行因果分析
-```
+- **课题意义**  
+  本项目通过自动化采集和高效分析，系统考察了微博用户邻居网络结构对其内容影响力的作用机制，为理解社交网络中结构性因素对信息传播和用户影响力的影响提供了实证基础。
 
-### 构建预测模型
-
-```python
-# 运行流行度预测模型
-from core.predict_popularity import main
-# 脚本会自动加载数据、构建模型并输出分析结果
-```
+---
 
 ## 注意事项
 
-1. 使用前请确保安装以下依赖库：
+1. **依赖库**：请确保已安装以下依赖（可通过pip安装）：
    - pandas
    - numpy
    - matplotlib
-   - econml
-   - sklearn
-   - shap
    - easygraph
-
-2. 数据文件较大时，网络构建和特征提取可能需要较长时间，请耐心等待
-
-3. 因果森林分析的结果解释需结合理论背景和实际场景
+   - tqdm
+   - requests
+2. **数据量较大时**，网络构建和指标计算可能需要较长时间，请耐心等待。
+3. **cookie失效时**，需重新获取并填写。
+4. **本项目仅用于学术研究，严禁用于任何违反平台规定的用
