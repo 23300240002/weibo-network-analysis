@@ -1,15 +1,44 @@
-# 忽略原始微博数据和所有大数据目录
+# 排除大型数据目录
 data/
+results/
 easygraph/
 zip/
 
-# 忽略临时文件和缓存
+# 排除配置文件中的敏感信息
+crawler/weiboSpider/config.json
+cookies.json
+
+# 排除进度和临时文件
+progress_*.json
+*.tmp
+*.log
+
+# 排除大型结果文件
+*.jsonl
+*.csv
+*.json
+
+# Python 缓存文件
 __pycache__/
 *.pyc
-.DS_Store
+*.pyo
+*.pyd
+.Python
+*.so
 
-# 可选：忽略所有csv（如只想保留代码和文档）
-*.csv
+# 环境文件
+.env
+.venv
+env/
+venv/
 
-# 可选：忽略VSCode工作区配置
+# IDE 文件
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
