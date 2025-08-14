@@ -4,9 +4,12 @@ results/
 easygraph/
 zip/
 
+# 排除整个weiboSpider目录（包含敏感配置和可能的大文件）
+crawler/weiboSpider/
+
 # 排除配置文件中的敏感信息
-crawler/weiboSpider/config.json
 cookies.json
+cookie.json
 
 # 排除进度和临时文件
 progress_*.json
