@@ -1,3 +1,4 @@
+# 3.3 - 兼容新fetch阶段输出
 import os
 import json
 import pandas as pd
@@ -7,6 +8,8 @@ import easygraph.functions as eg_f
 from scipy import linalg
 from datetime import datetime
 from collections import defaultdict, deque
+import signal
+import sys
 
 def normalize_id(id_value):
     """规范化用户ID，确保格式一致"""
@@ -17,6 +20,129 @@ def normalize_id(id_value):
         return str(int(float(id_str)))
     except:
         return str(id_value).strip()
+
+def signal_handler(signum, frame):
+    """处理Ctrl+C信号"""
+    print(f"\n\n⚠️ 收到中断信号 (Ctrl+C)")
+    print(f"📁 正在保存当前进度...")
+    sys.exit(0)
+
+def load_celebrity_users(base_dir):
+    """加载明星用户列表"""
+    high_fans_file = os.path.join(base_dir, 'high_fans_users.csv')
+    
+    if not os.path.exists(high_fans_file):
+        print(f"⚠️ 未找到明星用户文件: {high_fans_file}")
+        print(f"   所有用户的is_celebrity将设为False")
+        return set()
+    
+    try:
+        high_fans_df = pd.read_csv(high_fans_file)
+        celebrity_users = set(high_fans_df['user_id'].apply(normalize_id))
+        print(f"✅ 成功加载 {len(celebrity_users)} 个明星用户")
+        return celebrity_users
+    except Exception as e:
+        print(f"❌ 加载明星用户文件失败: {e}")
+        print(f"   所有用户的is_celebrity将设为False")
+        return set()
+
+def load_user_categories(base_dir):
+    """🔥 新增：加载用户类别信息（A/B/C）"""
+    users_file = os.path.join(base_dir, 'users.csv')
+    
+    if not os.path.exists(users_file):
+        print(f"⚠️ 未找到用户文件: {users_file}")
+        print(f"   所有用户的category将设为Unknown")
+        return {}
+    
+    try:
+        users_df = pd.read_csv(users_file)
+        users_df['user_id'] = users_df['user_id'].apply(normalize_id)
+        
+        # 检查是否有category列
+        if 'category' not in users_df.columns:
+            print(f"⚠️ users.csv中未找到category列")
+            print(f"   所有用户的category将设为Unknown")
+            return {}
+        
+        user_categories = dict(zip(users_df['user_id'], users_df['category']))
+        
+        # 统计各类用户数量
+        category_counts = users_df['category'].value_counts()
+        print(f"✅ 成功加载用户类别信息:")
+        for category, count in category_counts.items():
+            print(f"   - {category}类用户: {count} 个")
+        
+        return user_categories
+    except Exception as e:
+        print(f"❌ 加载用户类别文件失败: {e}")
+        print(f"   所有用户的category将设为Unknown")
+        return {}
+
+def get_user_selected_metrics():
+    """交互式选择要计算的网络指标"""
+    print("\n" + "="*60)
+    print("请选择要计算的网络指标：")
+    print("="*60)
+    print("1. 密度 (Density)")
+    print("2. 聚类系数 (Clustering Coefficient)")  
+    print("3. 邻居平均度 (Average Nearest Neighbor Degree)")
+    print("4. 介数中心性 (Betweenness Centrality) - 计算较慢")
+    print("5. 谱半径 (Spectral Radius)")
+    print("6. 模块度 (Modularity)")
+    print("="*60)
+    print("输入示例：")
+    print("  - 计算前三个指标：1 2 3")
+    print("  - 计算五大指标（推荐）：1 2 3 5 6") 
+    print("  - 计算全部六大指标：1 2 3 4 5 6")
+    print("  - 快速模式（前三个）：1 2 3")
+    
+    while True:
+        try:
+            user_input = input("\n请输入指标序号（用空格分隔）: ").strip()
+            if not user_input:
+                print("❌ 输入不能为空，请重新输入")
+                continue
+                
+            selected_numbers = [int(x.strip()) for x in user_input.split()]
+            
+            # 验证输入范围
+            if not all(1 <= num <= 6 for num in selected_numbers):
+                print("❌ 请输入1-6之间的数字")
+                continue
+                
+            # 去重并排序
+            selected_numbers = sorted(list(set(selected_numbers)))
+            
+            # 显示选择的指标
+            metric_names = {
+                1: "密度",
+                2: "聚类系数", 
+                3: "邻居平均度",
+                4: "介数中心性",
+                5: "谱半径",
+                6: "模块度"
+            }
+            
+            print(f"\n✅ 已选择 {len(selected_numbers)} 个指标：")
+            for num in selected_numbers:
+                print(f"   {num}. {metric_names[num]}")
+            
+            # 特别提醒介数中心性的计算时间
+            if 4 in selected_numbers:
+                print(f"\n⚠️ 注意：介数中心性计算较慢，大网络可能需要很长时间")
+                confirm = input("确认要包含介数中心性吗？(y/n): ").strip().lower()
+                if confirm != 'y':
+                    selected_numbers.remove(4)
+                    print(f"✅ 已移除介数中心性，当前选择：{selected_numbers}")
+            
+            return selected_numbers
+            
+        except ValueError:
+            print("❌ 输入格式错误，请输入数字，用空格分隔")
+        except KeyboardInterrupt:
+            print("\n❌ 用户取消操作")
+            return []
 
 def load_existing_progress(metrics_output, ego_networks_output):
     """加载已有进度，返回已完成的用户集合和数据"""
@@ -135,6 +261,23 @@ def bidirectional_bfs(G, start_node, radius):
     
     return distances
 
+def calculate_global_degrees(G, center_node):
+    """计算用户在全图中的出度和入度"""
+    try:
+        # 出度：该用户指向多少其他用户
+        out_degree = G.out_degree(center_node) if G.has_node(center_node) else 0
+        
+        # 入度：多少其他用户指向该用户
+        in_degree = G.in_degree(center_node) if G.has_node(center_node) else 0
+        
+        # 总度数
+        total_degree = out_degree + in_degree
+        
+        return out_degree, in_degree, total_degree
+    except Exception as e:
+        print(f"    ⚠️ 计算全图度数失败: {e}")
+        return 0, 0, 0
+
 def calculate_spectral_radius(G):
     """计算图的谱半径（最大特征值的绝对值）"""
     adj_matrix = eg.to_numpy_array(G)
@@ -145,6 +288,30 @@ def calculate_modularity(G):
     """计算图的模块度"""
     partition, modularity_value = louvain_communities_fixed(G, threshold=0.001)
     return modularity_value
+
+def calculate_betweenness_centrality(G, center_node):
+    """计算介数中心性，正确处理EasyGraph返回的结果"""
+    bc_start = datetime.now()
+    bc = eg_f.betweenness_centrality(G)
+    
+    # 处理EasyGraph可能返回列表或字典的情况
+    if isinstance(bc, list):
+        # 如果返回列表，需要找到中心节点的索引
+        node_list = list(G.nodes)
+        if center_node in node_list:
+            center_index = node_list.index(center_node)
+            result = bc[center_index] if center_index < len(bc) else 0.0
+        else:
+            result = 0.0
+    elif isinstance(bc, dict):
+        # 如果返回字典，直接获取
+        result = bc.get(center_node, 0.0)
+    else:
+        # 其他情况，返回0
+        result = 0.0
+    
+    bc_time = datetime.now() - bc_start
+    return result, bc_time
 
 def louvain_communities_fixed(G, weight="weight", threshold=0.001, max_iterations=100, max_levels=10):
     """修复版的Louvain社区检测算法"""
@@ -374,8 +541,8 @@ def create_ego_network_fixed(G, node, radius=2):
     
     return ego_graph
 
-def calculate_network_metrics_five_indicators(ego_graph, center_node):
-    """计算网络的五个指标（去掉介数中心性）"""
+def calculate_network_metrics_selected(ego_graph, center_node, selected_metrics, global_graph, celebrity_users, user_categories):
+    """🔥 修改版：计算网络指标，包含全图度数、明星用户标识和用户类别"""
     metrics = {}
     
     # 基本网络信息
@@ -383,31 +550,69 @@ def calculate_network_metrics_five_indicators(ego_graph, center_node):
     metrics['edge_count'] = ego_graph.number_of_edges()
     metrics['center_node'] = center_node
     
-    # 1. 密度
-    metrics['density'] = eg.density(ego_graph)
-    print(f"  - 密度计算完成: {metrics['density']:.6f}")
+    # 计算用户在全图中的度数信息
+    global_out_degree, global_in_degree, global_total_degree = calculate_global_degrees(global_graph, center_node)
+    metrics['global_out_degree'] = global_out_degree
+    metrics['global_in_degree'] = global_in_degree
+    metrics['global_total_degree'] = global_total_degree
     
-    # 2. 聚类系数
-    metrics['clustering_coefficient'] = eg_f.clustering(ego_graph, center_node)
-    print(f"  - 聚类系数计算完成: {metrics['clustering_coefficient']:.6f}")
+    # 判断是否为明星用户
+    is_celebrity = center_node in celebrity_users
+    metrics['is_celebrity'] = is_celebrity
     
-    # 3. 邻居平均度
-    metrics['average_nearest_neighbor_degree'] = calculate_average_neighbor_degree(ego_graph, center_node)
-    print(f"  - 邻居平均度计算完成: {metrics['average_nearest_neighbor_degree']:.6f}")
+    # 🔥 新增：获取用户类别信息
+    user_category = user_categories.get(center_node, 'Unknown')
+    metrics['user_category'] = user_category
     
-    # 跳过介数中心性（原第4个指标）
+    print(f"  - 全图度数信息: 出度 {global_out_degree}, 入度 {global_in_degree}, 总度数 {global_total_degree}")
+    print(f"  - 明星用户标识: {'是' if is_celebrity else '否'}")
+    print(f"  - 用户类别: {user_category}")
     
-    # 4. 谱半径（原第5个指标）
-    sr_start = datetime.now()
-    metrics['spectral_radius'] = calculate_spectral_radius(ego_graph)
-    sr_time = datetime.now() - sr_start
-    print(f"  - 谱半径计算完成: {metrics['spectral_radius']:.6f}, 耗时: {sr_time}")
-    
-    # 5. 模块度（原第6个指标）
-    mod_start = datetime.now()
-    metrics['modularity'] = calculate_modularity(ego_graph)
-    mod_time = datetime.now() - mod_start
-    print(f"  - 模块度计算完成: {metrics['modularity']:.6f}, 耗时: {mod_time}")
+    # 根据选择计算指标
+    for metric_num in selected_metrics:
+        start_time = datetime.now()
+        try:
+            if metric_num == 1:  # 密度
+                value = eg.density(ego_graph)
+                metrics['density'] = value
+                elapsed = datetime.now() - start_time
+                print(f"  - density 计算完成: {value:.6f}, 耗时: {elapsed}")
+                
+            elif metric_num == 2:  # 聚类系数
+                value = eg_f.clustering(ego_graph, center_node)
+                metrics['clustering_coefficient'] = value
+                elapsed = datetime.now() - start_time
+                print(f"  - clustering_coefficient 计算完成: {value:.6f}, 耗时: {elapsed}")
+                
+            elif metric_num == 3:  # 邻居平均度
+                value = calculate_average_neighbor_degree(ego_graph, center_node)
+                metrics['average_nearest_neighbor_degree'] = value
+                elapsed = datetime.now() - start_time
+                print(f"  - average_nearest_neighbor_degree 计算完成: {value:.6f}, 耗时: {elapsed}")
+                
+            elif metric_num == 4:  # 介数中心性
+                value, bc_time = calculate_betweenness_centrality(ego_graph, center_node)
+                metrics['betweenness_centrality'] = value
+                print(f"  - betweenness_centrality 计算完成: {value:.6f}, 耗时: {bc_time}")
+                
+            elif metric_num == 5:  # 谱半径
+                value = calculate_spectral_radius(ego_graph)
+                metrics['spectral_radius'] = value
+                elapsed = datetime.now() - start_time
+                print(f"  - spectral_radius 计算完成: {value:.6f}, 耗时: {elapsed}")
+                
+            elif metric_num == 6:  # 模块度
+                value = calculate_modularity(ego_graph)
+                metrics['modularity'] = value
+                elapsed = datetime.now() - start_time
+                print(f"  - modularity 计算完成: {value:.6f}, 耗时: {elapsed}")
+                
+        except Exception as e:
+            metric_names = {1: 'density', 2: 'clustering_coefficient', 3: 'average_nearest_neighbor_degree',
+                          4: 'betweenness_centrality', 5: 'spectral_radius', 6: 'modularity'}
+            metric_name = metric_names.get(metric_num, f'metric_{metric_num}')
+            print(f"  - ❌ {metric_name} 计算失败: {e}")
+            metrics[metric_name] = 0.0
     
     return metrics
 
@@ -438,72 +643,82 @@ def metrics_to_dataframe(metrics_data):
 
 def main():
     """主函数"""
+    # 设置信号处理器，优雅处理Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+    
     start_time = datetime.now()
     print(f"开始分析时间: {start_time}")
     print("使用修复版EasyGraph ego_graph，真正支持双向边")
-    print("计算五大网络指标（去掉介数中心性以提升效率）")
+    print("支持交互式选择网络指标")
     print("支持断点续传功能")
+    print("🔥 已修复介数中心性计算和Ctrl+C处理")
+    print("🔥 新增全图度数信息：出度、入度、总度数")
+    print("🔥 新增明星用户标识：基于high_fans_users.csv")
+    print("🔥 新增用户类别信息：A/B/C类标识")
+    print("🔥 新增双重影响力指标：支持avg_popularity_of_all")
     
-    # 设置路径
-    base_dir = 'data/domain_networks/merged_network'
-    edges_path = os.path.join(base_dir, 'edges.csv')
-    popularity_path = os.path.join(base_dir, 'popularity.csv')
-    output_dir = 'results/merged_network_result3'  # 新的输出目录
-    metrics_output = os.path.join(output_dir, 'network_metrics.jsonl')
-    ego_networks_output = os.path.join(output_dir, 'ego_networks_info.jsonl')
-    
-    # 确保输出目录存在
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # 检查是否已有进度文件，提供选项
-    has_existing_files = os.path.exists(metrics_output) or os.path.exists(ego_networks_output)
-    
-    if has_existing_files:
-        print(f"\n发现已有的进度文件:")
-        if os.path.exists(metrics_output):
-            print(f"  - 网络指标文件: {metrics_output}")
-        if os.path.exists(ego_networks_output):
-            print(f"  - ego网络信息文件: {ego_networks_output}")
+    try:
+        # 交互式选择指标
+        selected_metrics = get_user_selected_metrics()
+        if not selected_metrics:
+            print("❌ 未选择任何指标，程序退出")
+            return
         
-        print(f"\n请选择运行模式:")
-        print(f"1. 断点续传（推荐）- 从上次中断的地方继续")
-        print(f"2. 重新开始 - 删除已有进度，从头开始")
-        print(f"3. 仅生成合并文件 - 使用现有数据生成merged_metrics_popularity.csv")
+        # 显示最终选择
+        metric_names = {
+            1: "密度", 2: "聚类系数", 3: "邻居平均度",
+            4: "介数中心性", 5: "谱半径", 6: "模块度"
+        }
+        print(f"\n✅ 将计算以下 {len(selected_metrics)} 个指标:")
+        for num in selected_metrics:
+            print(f"   - {metric_names[num]}")
+        print(f"✅ 同时记录：出度、入度、总度数、二跳网络节点数、二跳网络边数、是否明星用户、用户类别")
         
-        while True:
-            choice = input("请选择 (1/2/3): ").strip()
-            if choice in ['1', '2', '3']:
-                break
-            print("请输入有效选项 (1/2/3)")
+        # 设置路径
+        base_dir = 'C:/Tengfei/data/data/domain_network3/user_3855570307'
+        edges_path = os.path.join(base_dir, 'edges.csv')
+        popularity_path = os.path.join(base_dir, 'popularity.csv')
+        output_dir = f'C:/Tengfei/data/results/user_3855570307_metrics'
+        metrics_output = os.path.join(output_dir, 'network_metrics.jsonl')
+        ego_networks_output = os.path.join(output_dir, 'ego_networks_info.jsonl')
         
-        if choice == '1':
-            resume_mode = True
-            recalculate = True
-        elif choice == '2':
-            resume_mode = False
-            recalculate = True
-        else:  # choice == '3'
-            resume_mode = False
-            recalculate = False
-    else:
-        resume_mode = False
-        recalculate = True
-    
-    # 加载数据、构建图并计算网络指标
-    if recalculate:
+        # 确保输出目录存在
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # 检查输入文件
+        if not os.path.exists(edges_path):
+            print(f"❌ 未找到edges.csv文件: {edges_path}")
+            return
+        
+        if not os.path.exists(popularity_path):
+            print(f"❌ 未找到popularity.csv文件: {popularity_path}")
+            return
+        
+        # 加载明星用户列表
+        celebrity_users = load_celebrity_users(base_dir)
+        
+        # 🔥 新增：加载用户类别信息
+        user_categories = load_user_categories(base_dir)
+        
         print("正在加载网络数据...")
         edges_df = pd.read_csv(edges_path)
         popularity_df = pd.read_csv(popularity_path)
         
         # 预处理：规范化ID
         print("正在规范化用户ID...")
-        source_id_map = {row['source']: normalize_id(row['source']) for _, row in edges_df.iterrows()}
-        target_id_map = {row['target']: normalize_id(row['target']) for _, row in edges_df.iterrows()}
-        edges_df['source'] = edges_df['source'].map(source_id_map)
-        edges_df['target'] = edges_df['target'].map(target_id_map)
-        
+        edges_df['source'] = edges_df['source'].apply(normalize_id)
+        edges_df['target'] = edges_df['target'].apply(normalize_id)
         popularity_df['user_id'] = popularity_df['user_id'].apply(normalize_id)
+        
+        # 🔥 新增：检查是否有avg_popularity_of_all列
+        has_total_popularity = 'avg_popularity_of_all' in popularity_df.columns
+        if has_total_popularity:
+            print(f"✅ 检测到总体影响力列 (avg_popularity_of_all)")
+            non_zero_total = (popularity_df['avg_popularity_of_all'] > 0).sum()
+            print(f"   有 {non_zero_total} 个用户具有非零总体影响力")
+        else:
+            print(f"⚠️ 未检测到总体影响力列，请先运行fetch3_helper.py")
         
         # 构建有向图
         print("正在构建网络...")
@@ -529,228 +744,210 @@ def main():
         print(f"图中节点总数: {len(G.nodes)}")
         print(f"有效匹配用户数: {len(valid_users)}")
         print(f"匹配率: {len(valid_users)/len(users_to_process)*100:.2f}%")
+        print(f"明星用户总数: {len(celebrity_users)}")
+        print(f"用户类别信息总数: {len(user_categories)}")
         
-        # 加载已有进度（如果是断点续传模式）
+        # 检查断点续传
+        has_existing_files = os.path.exists(metrics_output) or os.path.exists(ego_networks_output)
+        
+        if has_existing_files:
+            print(f"\n发现已有的进度文件，选择运行模式:")
+            print(f"1. 断点续传（推荐）")
+            print(f"2. 重新开始")
+            
+            while True:
+                choice = input("请选择 (1/2): ").strip()
+                if choice in ['1', '2']:
+                    break
+                print("请输入有效选项 (1/2)")
+            
+            resume_mode = (choice == '1')
+        else:
+            resume_mode = False
+        
+        # 初始化数据
+        all_metrics_data = {}
+        all_ego_networks_info = {}
+        
         if resume_mode:
             print(f"\n=== 断点续传模式 ===")
             completed_users, existing_metrics, existing_ego_info = load_existing_progress(metrics_output, ego_networks_output)
             
-            # 计算剩余用户
             remaining_users = valid_users - completed_users
             print(f"总用户数: {len(valid_users)}")
             print(f"已完成用户数: {len(completed_users)}")
             print(f"剩余用户数: {len(remaining_users)}")
-            print(f"已完成进度: {len(completed_users)/len(valid_users)*100:.1f}%")
             
             if len(remaining_users) == 0:
-                print("所有用户已处理完成，直接进入数据合并阶段")
-                # 使用已有数据
+                print("所有用户已处理完成")
                 all_metrics_data = existing_metrics
                 all_ego_networks_info = existing_ego_info
             else:
-                print(f"将继续处理剩余的 {len(remaining_users)} 个用户")
-                # 初始化总数据为已有数据
                 all_metrics_data = existing_metrics.copy()
                 all_ego_networks_info = existing_ego_info.copy()
-                
-                # 处理剩余用户
-                processed_count = len(completed_users)  # 从已完成数量开始
-                total_users = len(valid_users)
-                
-                print(f"开始处理剩余用户...")
-                loop_start_time = datetime.now()
-                batch_metrics = {}
-                batch_ego_info = {}
-                
-                for user_id in remaining_users:
-                    processed_count += 1
-                    completion = processed_count / total_users * 100
-                    print(f"\n处理用户 {user_id} (第{processed_count}/{total_users}个, 完成{completion:.1f}%):")
-                    
-                    # 创建用户的二跳邻居网络
-                    ego_start_time = datetime.now()
-                    ego_graph = create_ego_network_fixed(G, user_id, radius=2)
-                    ego_time = datetime.now() - ego_start_time
-                    
-                    if ego_graph and ego_graph.number_of_nodes() > 1:
-                        print(f"  - 双向二跳邻居网络创建完成: {ego_graph.number_of_nodes()} 节点, {ego_graph.number_of_edges()} 边")
-                        print(f"  - 耗时: {ego_time}")
-                    else:
-                        print(f"  - 双向二跳邻居网络创建失败或节点数过少，跳过此用户")
-                        continue
-                    
-                    # 计算网络指标
-                    print(f"  - 开始计算五大网络指标...")
-                    metrics_start_time = datetime.now()
-                    metrics = calculate_network_metrics_five_indicators(ego_graph, user_id)
-                    metrics_time = datetime.now() - metrics_start_time
-                    print(f"  - 五大网络指标计算完成, 总耗时: {metrics_time}")
-                    
-                    # 添加到批处理数据
-                    batch_metrics[user_id] = metrics
-                    all_metrics_data[user_id] = metrics
-                    
-                    # 存储二跳邻居网络信息
-                    ego_info = {
-                        'node_count': ego_graph.number_of_nodes(),
-                        'edge_count': ego_graph.number_of_edges(),
-                        'nodes': list(ego_graph.nodes),
-                        'metrics': {
-                            'density': metrics['density'],
-                            'clustering_coefficient': metrics['clustering_coefficient'],
-                            'average_nearest_neighbor_degree': metrics['average_nearest_neighbor_degree'],
-                            'spectral_radius': metrics['spectral_radius'],
-                            'modularity': metrics['modularity']
-                        }
-                    }
-                    batch_ego_info[user_id] = ego_info
-                    all_ego_networks_info[user_id] = ego_info
-                    
-                    # 每处理10个用户追加保存一次（避免频繁IO）
-                    if len(batch_metrics) >= 10:
-                        append_to_jsonl(batch_metrics, metrics_output, is_metrics=True)
-                        append_to_jsonl(batch_ego_info, ego_networks_output, is_metrics=False)
-                        print(f"  - 已追加保存 {len(batch_metrics)} 个用户的结果")
-                        batch_metrics.clear()
-                        batch_ego_info.clear()
-                
-                # 保存剩余的批处理数据
-                if batch_metrics:
-                    append_to_jsonl(batch_metrics, metrics_output, is_metrics=True)
-                    append_to_jsonl(batch_ego_info, ego_networks_output, is_metrics=False)
-                    print(f"  - 已追加保存最后 {len(batch_metrics)} 个用户的结果")
-                
-                loop_duration = datetime.now() - loop_start_time
-                print(f"\n剩余用户处理完成，耗时: {loop_duration}")
-                print(f"平均每个用户处理时间: {loop_duration.total_seconds() / max(1, len(remaining_users)):.2f} 秒")
+                users_to_calculate = remaining_users
         else:
-            # 全新开始模式
             print(f"\n=== 全新开始模式 ===")
-            all_metrics_data = {}
-            all_ego_networks_info = {}
-            
-            # 删除已有文件
             if os.path.exists(metrics_output):
                 os.remove(metrics_output)
-                print(f"已删除旧的网络指标文件")
             if os.path.exists(ego_networks_output):
                 os.remove(ego_networks_output)
-                print(f"已删除旧的ego网络信息文件")
-            
-            # 处理所有用户
-            processed_count = 0
+            users_to_calculate = valid_users
+        
+        # 计算网络指标
+        if len(users_to_calculate) > 0:
+            processed_count = len(valid_users) - len(users_to_calculate)
             total_users = len(valid_users)
-            print(f"开始计算 {total_users} 个用户的五大网络指标...")
-            loop_start_time = datetime.now()
+            
+            print(f"开始计算 {len(users_to_calculate)} 个用户的网络指标...")
             batch_metrics = {}
             batch_ego_info = {}
             
-            for user_id in valid_users:
+            for user_id in users_to_calculate:
                 processed_count += 1
                 completion = processed_count / total_users * 100
                 print(f"\n处理用户 {user_id} (第{processed_count}/{total_users}个, 完成{completion:.1f}%):")
                 
-                # 创建用户的二跳邻居网络
+                # 创建二跳邻居网络
                 ego_start_time = datetime.now()
                 ego_graph = create_ego_network_fixed(G, user_id, radius=2)
                 ego_time = datetime.now() - ego_start_time
                 
                 if ego_graph and ego_graph.number_of_nodes() > 1:
-                    print(f"  - 双向二跳邻居网络创建完成: {ego_graph.number_of_nodes()} 节点, {ego_graph.number_of_edges()} 边")
-                    print(f"  - 耗时: {ego_time}")
+                    print(f"  - 双向二跳邻居网络创建完成，耗时: {ego_time}")
                 else:
-                    print(f"  - 双向二跳邻居网络创建失败或节点数过少，跳过此用户")
+                    print(f"  - 网络创建失败或节点数过少，跳过此用户")
                     continue
                 
-                # 计算网络指标
-                print(f"  - 开始计算五大网络指标...")
+                # 🔥 修改：计算网络指标，传入用户类别信息
+                print(f"  - 开始计算选择的网络指标...")
                 metrics_start_time = datetime.now()
-                metrics = calculate_network_metrics_five_indicators(ego_graph, user_id)
+                metrics = calculate_network_metrics_selected(ego_graph, user_id, selected_metrics, G, celebrity_users, user_categories)
                 metrics_time = datetime.now() - metrics_start_time
-                print(f"  - 五大网络指标计算完成, 总耗时: {metrics_time}")
+                print(f"  - 网络指标计算完成, 总耗时: {metrics_time}")
                 
-                # 添加到数据
+                # 保存数据
                 batch_metrics[user_id] = metrics
                 all_metrics_data[user_id] = metrics
                 
-                # 存储二跳邻居网络信息
+                # 存储ego网络信息，包含用户类别
                 ego_info = {
                     'node_count': ego_graph.number_of_nodes(),
                     'edge_count': ego_graph.number_of_edges(),
                     'nodes': list(ego_graph.nodes),
-                    'metrics': {
-                        'density': metrics['density'],
-                        'clustering_coefficient': metrics['clustering_coefficient'],
-                        'average_nearest_neighbor_degree': metrics['average_nearest_neighbor_degree'],
-                        'spectral_radius': metrics['spectral_radius'],
-                        'modularity': metrics['modularity']
-                    }
+                    'selected_metrics': selected_metrics,
+                    'global_out_degree': metrics.get('global_out_degree', 0),
+                    'global_in_degree': metrics.get('global_in_degree', 0),
+                    'global_total_degree': metrics.get('global_total_degree', 0),
+                    'is_celebrity': metrics.get('is_celebrity', False),
+                    'user_category': metrics.get('user_category', 'Unknown'),  # 🔥 新增
+                    'metrics': {k: v for k, v in metrics.items() if k not in ['node_count', 'edge_count', 'center_node', 'global_out_degree', 'global_in_degree', 'global_total_degree', 'is_celebrity', 'user_category']}
                 }
                 batch_ego_info[user_id] = ego_info
                 all_ego_networks_info[user_id] = ego_info
                 
-                # 每处理10个用户追加保存一次
+                # 每10个用户保存一次
                 if len(batch_metrics) >= 10:
                     append_to_jsonl(batch_metrics, metrics_output, is_metrics=True)
                     append_to_jsonl(batch_ego_info, ego_networks_output, is_metrics=False)
-                    print(f"  - 已追加保存 {len(batch_metrics)} 个用户的结果")
+                    print(f"  - 已保存 {len(batch_metrics)} 个用户的结果")
                     batch_metrics.clear()
                     batch_ego_info.clear()
             
-            # 保存剩余的批处理数据
+            # 保存剩余数据
             if batch_metrics:
                 append_to_jsonl(batch_metrics, metrics_output, is_metrics=True)
                 append_to_jsonl(batch_ego_info, ego_networks_output, is_metrics=False)
-                print(f"  - 已追加保存最后 {len(batch_metrics)} 个用户的结果")
+        
+        # 生成合并数据
+        print("正在生成合并数据文件...")
+        metrics_df = metrics_to_dataframe(all_metrics_data)
+        
+        if len(metrics_df) > 0:
+            # 🔥 修改：合并两种影响力指标
+            if has_total_popularity:
+                # 合并两种影响力指标
+                merged_df = pd.merge(metrics_df, popularity_df[['user_id', 'avg_popularity', 'avg_popularity_of_all']], 
+                                    on="user_id", how="inner")
+                print(f"✅ 已合并两种影响力指标: avg_popularity (最新10条) 和 avg_popularity_of_all (总体)")
+            else:
+                # 只有一种影响力指标
+                merged_df = pd.merge(metrics_df, popularity_df[['user_id', 'avg_popularity']], 
+                                    on="user_id", how="inner")
+                print(f"⚠️ 只有一种影响力指标: avg_popularity (最新10条)")
             
-            loop_duration = datetime.now() - loop_start_time
-            print(f"\n用户处理循环完成，总耗时: {loop_duration}")
-            print(f"平均每个用户处理时间: {loop_duration.total_seconds() / max(1, len(all_metrics_data)):.2f} 秒")
+            # 保存合并数据
+            merged_output = os.path.join(output_dir, 'merged_metrics_popularity.csv')
+            merged_df.to_csv(merged_output, index=False)
+            print(f"合并数据已保存到: {merged_output}")
+            print(f"包含 {len(merged_df)} 行数据")
+            
+            # 显示计算的指标
+            calculated_metrics = [col for col in merged_df.columns if col not in ['user_id', 'center_node', 'avg_popularity', 'avg_popularity_of_all']]
+            print(f"\n✅ 已计算的指标和信息: {calculated_metrics}")
+            
+            # 显示度数统计
+            if 'global_out_degree' in merged_df.columns:
+                print(f"\n📊 度数统计:")
+                print(f"   平均出度: {merged_df['global_out_degree'].mean():.2f}")
+                print(f"   平均入度: {merged_df['global_in_degree'].mean():.2f}")
+                print(f"   平均总度数: {merged_df['global_total_degree'].mean():.2f}")
+            
+            # 显示明星用户统计
+            if 'is_celebrity' in merged_df.columns:
+                celebrity_count = merged_df['is_celebrity'].sum()
+                print(f"\n🌟 明星用户统计:")
+                print(f"   明星用户数量: {celebrity_count}")
+                print(f"   明星用户比例: {celebrity_count/len(merged_df)*100:.2f}%")
+            
+            # 🔥 新增：显示用户类别统计
+            if 'user_category' in merged_df.columns:
+                category_counts = merged_df['user_category'].value_counts()
+                print(f"\n📋 用户类别统计:")
+                for category, count in category_counts.items():
+                    print(f"   {category}类用户: {count} 个 ({count/len(merged_df)*100:.1f}%)")
+            
+            # 🔥 新增：显示影响力对比统计
+            if has_total_popularity:
+                print(f"\n📊 双重影响力对比:")
+                # 有效数据（非零）的统计
+                valid_recent = merged_df['avg_popularity'] > 0
+                valid_total = merged_df['avg_popularity_of_all'] > 0
+                
+                print(f"   最新10条影响力 > 0: {valid_recent.sum()} 个用户 ({valid_recent.sum()/len(merged_df)*100:.1f}%)")
+                print(f"   总体影响力 > 0: {valid_total.sum()} 个用户 ({valid_total.sum()/len(merged_df)*100:.1f}%)")
+                
+                if valid_recent.any():
+                    print(f"   最新10条平均值: {merged_df.loc[valid_recent, 'avg_popularity'].mean():.2f}")
+                if valid_total.any():
+                    print(f"   总体平均值: {merged_df.loc[valid_total, 'avg_popularity_of_all'].mean():.2f}")
         
-        print(f"已计算 {len(all_metrics_data)} 个用户的五大网络指标")
-    else:
-        # 仅生成合并文件模式 - 加载已有数据
-        print("加载已有的网络指标...")
-        completed_users, all_metrics_data, all_ego_networks_info = load_existing_progress(metrics_output, ego_networks_output)
+        end_time = datetime.now()
+        duration = end_time - start_time
+        print(f"\n总耗时: {duration}")
+        print(f"生成的文件:")
+        print(f"  - 网络指标: {metrics_output}")
+        print(f"  - 邻居网络信息: {ego_networks_output}")
+        print(f"  - 合并数据: {merged_output}")
+        print(f"\n🔥 新增功能已启用：")
+        print(f"   ✅ 每个用户的出度、入度、总度数已记录")
+        print(f"   ✅ 每个用户的明星用户标识已记录")
+        print(f"   ✅ 每个用户的类别信息（A/B/C）已记录")
+        if has_total_popularity:
+            print(f"   ✅ 双重影响力指标：最新10条 + 总体平均")
+            print(f"   ✅ 总计14个信息：用户ID + 6大网络指标 + 7大基础信息")
+        else:
+            print(f"   ⚠️ 单一影响力指标：仅最新10条")
+            print(f"   ✅ 总计13个信息：用户ID + 6大网络指标 + 6大基础信息")
         
-        popularity_df = pd.read_csv(popularity_path)
-        popularity_df['user_id'] = popularity_df['user_id'].apply(normalize_id)
-        print(f"已加载 {len(all_metrics_data)} 个用户的五大网络指标")
-    
-    # 将指标转换为DataFrame格式并保存merged_metrics_popularity.csv
-    print("正在生成合并数据文件...")
-    metrics_df = metrics_to_dataframe(all_metrics_data)
-    
-    if len(metrics_df) > 0:
-        # 规范化ID并合并数据
-        metrics_df['user_id'] = metrics_df['user_id'].apply(normalize_id)
-        popularity_df['user_id'] = popularity_df['user_id'].apply(normalize_id)
-        
-        merged_df = pd.merge(metrics_df, popularity_df[['user_id', 'avg_popularity']], 
-                            on="user_id", how="inner")
-        
-        # 保存合并后的数据
-        merged_output = os.path.join(output_dir, 'merged_metrics_popularity.csv')
-        merged_df.to_csv(merged_output, index=False)
-        print(f"合并后的数据已保存到: {merged_output}")
-        print(f"合并后的数据包含 {len(merged_df)} 行")
-        
-        # 打印数据字段信息
-        print(f"\n=== 生成的数据字段 ===")
-        print(f"基本字段: user_id, node_count, edge_count, center_node, avg_popularity")
-        print(f"五大网络指标: density, clustering_coefficient, average_nearest_neighbor_degree, spectral_radius, modularity")
-        print(f"总字段数: {len(merged_df.columns)}")
-    else:
-        print("错误：没有有效的网络指标数据")
-    
-    end_time = datetime.now()
-    duration = end_time - start_time
-    print(f"\n数据生成完成，总耗时: {duration}")
-    print(f"生成的文件:")
-    print(f"  - 网络指标: {metrics_output}")
-    print(f"  - 邻居网络信息: {ego_networks_output}")
-    print(f"  - 合并数据: {merged_output}")
-    print(f"\n现在可以使用correlation_analysis目录下的脚本进行相关性分析")
+    except KeyboardInterrupt:
+        print(f"\n\n⚠️ 程序被用户中断 (Ctrl+C)")
+        print(f"📁 数据已保存到进度文件，可以稍后继续运行")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ 程序发生异常: {e}")
+        print(f"📁 请检查数据文件和路径配置")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -31,8 +31,8 @@ class AdvancedAnomalyDetector:
         """加载数据"""
         print("正在加载数据...")
         
-        # 加载可分析的用户数据
-        merged_data_path = 'results/merged_network_result3/merged_metrics_popularity.csv'
+        # 🔥 修改：使用新的数据路径，兼容create3.py的输出
+        merged_data_path = 'C:/Tengfei/data/results/user_3855570307_metrics/merged_metrics_popularity.csv'
         if not os.path.exists(merged_data_path):
             print(f"错误: 未找到文件 {merged_data_path}")
             return False
@@ -40,8 +40,8 @@ class AdvancedAnomalyDetector:
         self.merged_df = pd.read_csv(merged_data_path)
         self.merged_df['user_id'] = self.merged_df['user_id'].apply(normalize_id)
         
-        # 加载边数据（用于方案三的邻居分析）
-        edges_path = 'data/domain_networks1/merged_network/edges.csv'
+        # 🔥 修改：使用新的边数据路径
+        edges_path = 'C:/Tengfei/data/data/domain_network3/user_3855570307/edges.csv'
         if not os.path.exists(edges_path):
             print(f"错误: 未找到文件 {edges_path}")
             return False
@@ -64,6 +64,14 @@ class AdvancedAnomalyDetector:
             self.user_neighbors[source].add(target)
         
         print(f"数据加载完成: {len(self.merged_df)} 个可分析用户")
+        
+        # 🔥 新增：检查明星用户标识列是否存在
+        if 'is_celebrity' in self.merged_df.columns:
+            celebrity_count = self.merged_df['is_celebrity'].sum()
+            print(f"✅ 检测到明星用户标识列，共有 {celebrity_count} 个明星用户")
+        else:
+            print(f"⚠️ 未检测到明星用户标识列，方法4将无法使用")
+        
         return True
     
     def method1_influence_edge_ratio(self, exclude_pct):
@@ -112,6 +120,11 @@ class AdvancedAnomalyDetector:
             print("原始网络，无需检测异常用户")
             return set()
         
+        # 🔥 修改：检查介数中心性列是否存在
+        if 'betweenness_centrality' not in self.merged_df.columns:
+            print("❌ 数据中缺少betweenness_centrality列，方法2无法使用")
+            return set()
+        
         print("正在计算结构洞异常分数...")
         
         # 直接从CSV中获取数据，无需重新计算
@@ -121,7 +134,7 @@ class AdvancedAnomalyDetector:
         for _, row in self.merged_df.iterrows():
             user_id = row['user_id']
             popularity = row['avg_popularity']
-            betweenness = row['ego_betweenness']
+            betweenness = row['betweenness_centrality']
             
             # 计算异常分数：高影响力但低介数中心性
             if popularity > 0 and betweenness >= 0:
@@ -229,6 +242,39 @@ class AdvancedAnomalyDetector:
         
         return abnormal_users
     
+    def method4_celebrity_removal(self):
+        """🔥 新增方法4: 明星用户移除检测 - 直接移除所有明星用户"""
+        print(f"\n=== 方法4: 明星用户移除检测 ===")
+        
+        # 检查是否有明星用户标识列
+        if 'is_celebrity' not in self.merged_df.columns:
+            print("❌ 数据中缺少is_celebrity列，方法4无法使用")
+            return set()
+        
+        print("正在识别明星用户...")
+        
+        # 找出所有明星用户
+        celebrity_users = set(self.merged_df[self.merged_df['is_celebrity'] == True]['user_id'])
+        
+        actual_exclude_pct = len(celebrity_users) / len(self.merged_df) * 100
+        
+        print(f"检测到 {len(celebrity_users)} 个明星用户")
+        print(f"实际排除比例: {actual_exclude_pct:.2f}%")
+        
+        # 显示前5个明星用户示例
+        if len(celebrity_users) > 0:
+            celebrity_df = self.merged_df[self.merged_df['is_celebrity'] == True].sort_values('avg_popularity', ascending=False)
+            print("前5个明星用户示例（按影响力排序）:")
+            top_5 = celebrity_df.head(5)
+            for idx, (_, row) in enumerate(top_5.iterrows()):
+                # 获取用户的度数信息
+                out_degree = row.get('global_out_degree', 0)
+                in_degree = row.get('global_in_degree', 0)
+                print(f"  {idx+1}. 用户ID: {row['user_id']}, 影响力: {row['avg_popularity']:.2f}, "
+                      f"出度: {out_degree}, 入度: {in_degree}")
+        
+        return celebrity_users
+    
     def detect_anomalies_batch(self, methods, exclude_percentages):
         """批量检测多个比例下的异常用户"""
         all_results = {}
@@ -256,6 +302,12 @@ class AdvancedAnomalyDetector:
                 all_abnormal_users.update(method3_users)
                 method_results['method3'] = method3_users
             
+            # 🔥 新增：方法4的处理
+            if 4 in methods:
+                method4_users = self.method4_celebrity_removal()
+                all_abnormal_users.update(method4_users)
+                method_results['method4'] = method4_users
+            
             all_results[exclude_pct] = {
                 'all_abnormal_users': all_abnormal_users,
                 'method_results': method_results
@@ -272,18 +324,29 @@ def interactive_detection():
     print("1. 影响力/连边数比值异常检测")
     print("2. 结构洞异常检测（高影响力但低介数中心性）")
     print("3. 邻居质量异常检测（高影响力但邻居质量低）")
+    print("4. 明星用户移除检测（直接移除所有明星用户）🔥新增")
     
     # 选择方法
     while True:
         try:
-            method_input = input("\n请选择要使用的方法（用逗号分隔，如1,2,3）: ").strip()
+            method_input = input("\n请选择要使用的方法（用逗号分隔，如1,2,3,4）: ").strip()
             methods = [int(x.strip()) for x in method_input.split(',')]
-            if all(m in [1, 2, 3] for m in methods):
+            if all(m in [1, 2, 3, 4] for m in methods):
                 break
             else:
-                print("请输入有效的方法编号（1-3）")
+                print("请输入有效的方法编号（1-4）")
         except ValueError:
             print("请输入有效的数字")
+    
+    # 🔥 新增：如果选择了方法4，提醒用户其特殊性
+    if 4 in methods:
+        print(f"\n⚠️ 注意：方法4（明星用户移除）与其他方法不同：")
+        print(f"   - 不依赖排除比例，直接移除所有明星用户")
+        print(f"   - 将在每个排除比例下都执行相同的明星用户移除")
+        confirm = input("确认要包含方法4吗？(y/n): ").strip().lower()
+        if confirm != 'y':
+            methods.remove(4)
+            print(f"✅ 已移除方法4，当前选择：{methods}")
     
     # 选择排除比例
     while True:
@@ -329,12 +392,13 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
                 'exclude_percentage': exclude_pct
             })
         
-        # 添加详细信息
+        # 🔥 修改：添加详细信息，包括明星用户标识
         detailed_info = []
         if exclude_pct == 0:
             # 原始网络：空详细信息
             detailed_df = pd.DataFrame(columns=['user_id', 'avg_popularity', 'edge_count', 
-                                               'detected_by_method1', 'detected_by_method2', 'detected_by_method3'])
+                                               'detected_by_method1', 'detected_by_method2', 
+                                               'detected_by_method3', 'detected_by_method4', 'is_celebrity'])
         else:
             # 计算edge_count用于详细信息
             user_out_edges = detector.edges_df['source'].value_counts().to_dict()
@@ -352,7 +416,9 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
                     'edge_count': total_edges,
                     'detected_by_method1': user_id in method_results.get('method1', set()),
                     'detected_by_method2': user_id in method_results.get('method2', set()),
-                    'detected_by_method3': user_id in method_results.get('method3', set())
+                    'detected_by_method3': user_id in method_results.get('method3', set()),
+                    'detected_by_method4': user_id in method_results.get('method4', set()),  # 🔥新增
+                    'is_celebrity': user_info.get('is_celebrity', False)  # 🔥新增
                 })
             detailed_df = pd.DataFrame(detailed_info)
         
@@ -360,7 +426,7 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
         abnormal_df.to_csv(f'{output_dir}/abnormal_users.csv', index=False)
         detailed_df.to_csv(f'{output_dir}/abnormal_users_detailed.csv', index=False)
         
-        # 生成报告
+        # 🔥 修改：生成报告，包含方法4信息
         with open(f'{output_dir}/detection_report.txt', 'w', encoding='utf-8') as f:
             if exclude_pct == 0:
                 f.write("=== 原始网络分析报告 ===\n\n")
@@ -379,7 +445,14 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
             
             if exclude_pct > 0:
                 for method_name, users in method_results.items():
-                    f.write(f"{method_name} 检测到: {len(users)} 个用户\n")
+                    method_descriptions = {
+                        'method1': '影响力/连边数比值异常',
+                        'method2': '结构洞异常（高影响力低介数中心性）',
+                        'method3': '邻居质量异常（高影响力低邻居质量）',
+                        'method4': '明星用户移除'  # 🔥新增
+                    }
+                    desc = method_descriptions.get(method_name, method_name)
+                    f.write(f"{method_name} ({desc}) 检测到: {len(users)} 个用户\n")
                 
                 # 方法重叠分析
                 if len(method_results) > 1:
@@ -388,6 +461,16 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
                     if len(method_sets) >= 2:
                         intersection = set.intersection(*method_sets)
                         f.write(f"所有方法共同检测到: {len(intersection)} 个用户\n")
+                        
+                        # 🔥 新增：特别分析方法4的重叠情况
+                        if 'method4' in method_results:
+                            method4_users = method_results['method4']
+                            other_methods = {k: v for k, v in method_results.items() if k != 'method4'}
+                            if other_methods:
+                                other_union = set.union(*other_methods.values()) if other_methods else set()
+                                overlap_with_others = method4_users.intersection(other_union)
+                                f.write(f"明星用户与其他方法重叠: {len(overlap_with_others)} 个用户\n")
+                                f.write(f"仅被方法4检测到的明星用户: {len(method4_users - other_union)} 个用户\n")
         
         print(f"  - 排除比例 {exclude_pct}% 结果已保存到: {output_dir}")
 
@@ -400,6 +483,10 @@ def main():
     print(f"检测方法: {methods}")
     print(f"排除比例: {exclude_percentages}")
     print(f"总共需要处理 {len(exclude_percentages)} 种情况")
+    
+    # 🔥 新增：特别提醒方法4的特殊性
+    if 4 in methods:
+        print(f"\n⚠️ 特别提醒：方法4（明星用户移除）将在每个比例下执行相同操作")
     
     confirm = input("\n确认开始批量检测？(y/n): ").strip().lower()
     if confirm != 'y':
@@ -425,13 +512,25 @@ def main():
     print(f"\n开始保存批量检测结果...")
     save_batch_results(detector, all_results, methods, output_base_dir)
     
-    # 生成批量汇总报告
+    # 🔥 修改：生成批量汇总报告，包含方法4信息
     summary_path = f'{output_base_dir}/batch_detection_summary.txt'
     with open(summary_path, 'w', encoding='utf-8') as f:
         f.write("====== 批量异常用户检测汇总报告 ======\n")
         f.write(f"检测时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"使用方法: {methods}\n")
         f.write(f"测试比例: {exclude_percentages}\n\n")
+        
+        # 🔥 新增：方法说明
+        f.write("=== 检测方法说明 ===\n")
+        method_descriptions = {
+            1: "影响力/连边数比值异常检测",
+            2: "结构洞异常检测（高影响力但低介数中心性）",
+            3: "邻居质量异常检测（高影响力但邻居质量低）",
+            4: "明星用户移除检测（直接移除所有明星用户）"
+        }
+        for method_num in methods:
+            f.write(f"方法{method_num}: {method_descriptions[method_num]}\n")
+        f.write("\n")
         
         f.write("=== 各比例检测结果汇总 ===\n")
         f.write(f"{'排除比例':<10} {'异常用户数':<12} {'实际排除比例':<15} {'状态'}\n")
@@ -449,6 +548,12 @@ def main():
         f.write(f"总用户数: {len(detector.merged_df)}\n")
         f.write(f"处理的比例数: {len(exclude_percentages)}\n")
         f.write(f"使用的检测方法数: {len(methods)}\n")
+        
+        # 🔥 新增：明星用户统计
+        if 4 in methods and 'is_celebrity' in detector.merged_df.columns:
+            celebrity_count = detector.merged_df['is_celebrity'].sum()
+            f.write(f"明星用户总数: {celebrity_count}\n")
+            f.write(f"明星用户比例: {celebrity_count/len(detector.merged_df)*100:.2f}%\n")
     
     end_time = datetime.now()
     duration = end_time - start_time

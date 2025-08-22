@@ -107,8 +107,64 @@ def load_abnormal_users_from_folder(folder_name):
         print(f"加载异常用户文件出错 {abnormal_file}: {e}")
         return set()
 
+def detect_network_features(merged_df):
+    """🔥 新增：自动检测数据中的网络特征，排除非分析字段"""
+    # 需要排除的字段
+    excluded_columns = {
+        'user_id',           # 用户ID
+        'center_node',       # 中心节点（与user_id重复）
+        'avg_popularity',    # 影响力（因变量）
+        'is_celebrity'       # 明星用户标识（非网络指标）
+    }
+    
+    # 🔥 自动检测所有可分析的网络特征
+    network_features = []
+    for col in merged_df.columns:
+        if col not in excluded_columns:
+            # 检查是否为数值型
+            if pd.api.types.is_numeric_dtype(merged_df[col]):
+                network_features.append(col)
+    
+    # 按照重要性排序（优先显示传统的6大网络指标）
+    priority_order = [
+        'density', 'clustering_coefficient', 'average_nearest_neighbor_degree',
+        'betweenness_centrality', 'spectral_radius', 'modularity',
+        'global_out_degree', 'global_in_degree', 'global_total_degree',
+        'node_count', 'edge_count'
+    ]
+    
+    # 重新排序：优先级特征在前，其他特征在后
+    ordered_features = []
+    for feature in priority_order:
+        if feature in network_features:
+            ordered_features.append(feature)
+            
+    # 添加其他未在优先级列表中的特征
+    for feature in network_features:
+        if feature not in ordered_features:
+            ordered_features.append(feature)
+    
+    print(f"\n🔍 自动检测到 {len(ordered_features)} 个可分析的网络特征:")
+    
+    # 🔥 新增：按类别显示特征
+    traditional_features = [f for f in ordered_features if f in priority_order[:6]]
+    degree_features = [f for f in ordered_features if f in priority_order[6:9]]
+    network_size_features = [f for f in ordered_features if f in priority_order[9:11]]
+    other_features = [f for f in ordered_features if f not in priority_order]
+    
+    if traditional_features:
+        print(f"  📊 传统网络指标 ({len(traditional_features)}个): {', '.join(traditional_features)}")
+    if degree_features:
+        print(f"  🔗 度数指标 ({len(degree_features)}个): {', '.join(degree_features)}")
+    if network_size_features:
+        print(f"  📏 网络规模指标 ({len(network_size_features)}个): {', '.join(network_size_features)}")
+    if other_features:
+        print(f"  ➕ 其他指标 ({len(other_features)}个): {', '.join(other_features)}")
+    
+    return ordered_features
+
 def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_info):
-    """计算排除异常用户后的相关性"""
+    """🔥 修改版：计算排除异常用户后的相关性，自动检测所有网络特征"""
     merged_df['user_id'] = merged_df['user_id'].apply(normalize_id)
     filtered_df = merged_df[~merged_df['user_id'].isin(abnormal_users)].copy()
     
@@ -119,15 +175,12 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
     if len(filtered_df) < 10:
         print(f"  - 警告: 剩余用户数过少 ({len(filtered_df)})，可能影响相关性分析的可靠性")
     
-    # 六大网络特征
-    network_features = [
-        'density',
-        'clustering_coefficient', 
-        'average_nearest_neighbor_degree',
-        # 'ego_betweenness',
-        'spectral_radius',
-        'modularity'
-    ]
+    # 🔥 关键修改：自动检测网络特征
+    network_features = detect_network_features(filtered_df)
+    
+    if not network_features:
+        print(f"  - 错误: 未检测到任何可分析的网络特征")
+        return {}, len(merged_df), len(abnormal_users), len(filtered_df)
     
     # 计算相关性
     correlations = {}
@@ -187,7 +240,7 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
 
 def save_results(correlations, original_count, excluded_count, remaining_count, 
                 folder_info, output_dir):
-    """保存分析结果"""
+    """🔥 修改版：保存分析结果，支持动态特征数量"""
     result_dir = os.path.join(output_dir, folder_info['folder_name'])
     ensure_dir(result_dir)
     
@@ -221,7 +274,8 @@ def save_results(correlations, original_count, excluded_count, remaining_count,
         f.write(f"排除比例: {excluded_count/original_count*100:.2f}%\n")
         f.write(f"保留比例: {remaining_count/original_count*100:.2f}%\n\n")
         
-        f.write(f"=== 六大网络特征与影响力相关性分析 ===\n")
+        # 🔥 修改：动态标题，支持任意数量的特征
+        f.write(f"=== 网络特征与影响力相关性分析 (共{len(correlations)}个特征) ===\n")
         f.write(f"{'特征名称':<35} {'Spearman相关系数':<18} {'Spearman P值':<15} {'Kendall相关系数':<17} {'Kendall P值':<15} {'显著性'}\n")
         f.write("-" * 120 + "\n")
         
@@ -242,9 +296,11 @@ def save_results(correlations, original_count, excluded_count, remaining_count,
         f.write(f"\n=== 分析说明 ===\n")
         f.write(f"1. 使用检测方法: {', '.join(folder_info['methods'])}\n")
         f.write(f"2. 排除比例: {folder_info['exclude_pct']}%\n")
-        f.write(f"3. Spearman相关系数衡量单调关系，Kendall相关系数衡量序列一致性\n")
-        f.write(f"4. P值<0.05认为相关性显著\n")
-        f.write(f"5. 相关系数绝对值越大，表示相关性越强\n")
+        f.write(f"3. 自动检测到 {len(correlations)} 个网络特征进行分析\n")
+        f.write(f"4. Spearman相关系数衡量单调关系，Kendall相关系数衡量序列一致性\n")
+        f.write(f"5. P值<0.05认为相关性显著\n")
+        f.write(f"6. 相关系数绝对值越大，表示相关性越强\n")
+        f.write(f"7. 已自动排除非分析字段: user_id, center_node, avg_popularity, is_celebrity\n")
     
     print(f"  - 结果已保存到: {result_dir}")
     return csv_path, txt_path
@@ -255,12 +311,12 @@ def main():
     print(f"开始自适应异常用户相关性分析...")
     print(f"分析时间: {start_time}")
     
-    # 加载已有的合并数据
-    merged_data_path = 'results/merged_network_result1/merged_metrics_popularity.csv'
+    # 🔥 修改：使用新的数据路径
+    merged_data_path = 'C:/Tengfei/data/results/user_3855570307_metrics/merged_metrics_popularity.csv'
     
     if not os.path.exists(merged_data_path):
         print(f"错误: 未找到合并数据文件 {merged_data_path}")
-        print("请先运行 new_analysis.py 生成 merged_metrics_popularity.csv")
+        print("请先运行 create3.py 生成 merged_metrics_popularity.csv")
         return
     
     print(f"正在加载合并数据: {merged_data_path}")
@@ -271,15 +327,16 @@ def main():
         print(f"加载合并数据出错: {e}")
         return
     
-    # 检查必要的列
-    required_columns = ['user_id', 'avg_popularity', 'density', 'clustering_coefficient', 
-                       'average_nearest_neighbor_degree', 'ego_betweenness', 
-                       'spectral_radius', 'modularity']
+    # 🔥 修改：检查必要的列（移除硬编码的网络特征检查）
+    required_columns = ['user_id', 'avg_popularity']
     
     missing_columns = [col for col in required_columns if col not in merged_df.columns]
     if missing_columns:
         print(f"错误: 合并数据缺少必要的列: {missing_columns}")
         return
+    
+    print(f"✅ 数据格式验证通过")
+    print(f"📊 数据包含列: {list(merged_df.columns)}")
     
     # 自动检测异常用户文件夹
     print(f"\n{'='*60}")
@@ -331,7 +388,7 @@ def main():
             'remaining_count': remaining_count
         }
     
-    # 生成对比汇总报告
+    # 🔥 修改：生成动态对比汇总报告
     print(f"\n{'='*60}")
     print(f"生成对比汇总报告...")
     
@@ -360,11 +417,14 @@ def main():
             f.write(f"{folder_info['short_name']:<15} {result['original_count']:<12} {result['excluded_count']:<12} "
                    f"{result['remaining_count']:<12} {exclude_pct:<10.2f}% {remain_pct:.2f}%\n")
         
-        # 相关性对比 - 使用清晰的列名
-        features = ['density', 'clustering_coefficient', 'average_nearest_neighbor_degree',
-                   'ego_betweenness', 'spectral_radius', 'modularity']
+        # 🔥 修改：动态获取所有特征进行对比
+        all_features = set()
+        for folder_name in abnormal_folders:
+            all_features.update(all_results[folder_name]['correlations'].keys())
         
-        f.write(f"\n=== Spearman相关系数对比 ===\n")
+        features = sorted(list(all_features))  # 排序保证一致性
+        
+        f.write(f"\n=== Spearman相关系数对比 (共{len(features)}个特征) ===\n")
         # 构建列标题
         header = f"{'特征':<35} "
         for folder_name in abnormal_folders:
@@ -386,7 +446,7 @@ def main():
                     line += f"{'N/A':<15}"
             f.write(line + "\n")
         
-        f.write(f"\n=== Kendall相关系数对比 ===\n")
+        f.write(f"\n=== Kendall相关系数对比 (共{len(features)}个特征) ===\n")
         # 构建列标题
         header = f"{'特征':<35} "
         for folder_name in abnormal_folders:
@@ -409,11 +469,13 @@ def main():
             f.write(line + "\n")
         
         f.write(f"\n=== 分析说明 ===\n")
-        f.write(f"Original: 原始网络，未排除任何用户\n")
+        f.write(f"1. 自动检测并分析了 {len(features)} 个网络特征\n")
+        f.write(f"2. 已排除非分析字段: user_id, center_node, avg_popularity, is_celebrity\n")
+        f.write(f"3. Original: 原始网络，未排除任何用户\n")
         for folder_name in abnormal_folders:
             folder_info = all_results[folder_name]['folder_info']
             if folder_info['exclude_pct'] > 0:
-                f.write(f"{folder_info['short_name']}: 排除前{folder_info['exclude_pct']}%异常用户\n")
+                f.write(f"4. {folder_info['short_name']}: 排除前{folder_info['exclude_pct']}%异常用户\n")
     
     end_time = datetime.now()
     duration = end_time - start_time

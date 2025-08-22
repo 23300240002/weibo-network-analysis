@@ -1,12 +1,14 @@
 import os
-import json
 import pandas as pd
 import numpy as np
-import easygraph as eg
-import easygraph.functions as eg_f
-from scipy import linalg
+from scipy import stats
 from datetime import datetime
-from collections import defaultdict, deque
+import re
+
+def ensure_dir(directory):
+    """确保目录存在，如果不存在则创建"""
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
 def normalize_id(id_value):
     """规范化用户ID，确保格式一致"""
@@ -18,561 +20,741 @@ def normalize_id(id_value):
     except:
         return str(id_value).strip()
 
-def ego_graph_fixed(G, n, radius=1, center=True, undirected=False, distance=None):
-    """修复版的ego_graph函数，真正支持双向边"""
+def detect_abnormal_user_folders():
+    """自动检测所有异常用户文件夹"""
+    base_dir = 'results/pick_out_abnormal_users'
     
-    if distance is not None:
-        # 如果指定了距离权重，使用dijkstra算法
-        if undirected and G.is_directed():
-            # 对有向图执行双向搜索
-            sp_out = eg_f.single_source_dijkstra(G, n, weight=distance)
-            # 反向图搜索入边
-            G_reversed = G.reverse()
-            sp_in = eg_f.single_source_dijkstra(G_reversed, n, weight=distance)
-            # 合并结果
-            sp = {}
-            for node, dist in sp_out.items():
-                if dist <= radius:
-                    sp[node] = dist
-            for node, dist in sp_in.items():
-                if dist <= radius:
-                    if node not in sp or dist < sp[node]:
-                        sp[node] = dist
-        else:
-            sp = eg_f.single_source_dijkstra(G, n, weight=distance)
-    else:
-        # 使用BFS进行双向搜索
-        if undirected and G.is_directed():
-            sp = bidirectional_bfs(G, n, radius)
-        else:
-            sp = eg_f.single_source_dijkstra(G, n)
+    if not os.path.exists(base_dir):
+        print(f"错误: 异常用户目录不存在 {base_dir}")
+        return []
     
-    # 过滤距离范围内的节点
-    nodes = [node for node, dist in sp.items() if dist <= radius]
+    folders = []
+    for item in os.listdir(base_dir):
+        folder_path = os.path.join(base_dir, item)
+        if os.path.isdir(folder_path):
+            csv_file = os.path.join(folder_path, 'abnormal_users.csv')
+            if os.path.exists(csv_file):
+                folders.append(item)
     
-    # 创建子图
-    H = G.nodes_subgraph(nodes)
+    # 按文件夹名称排序，确保原始网络排在前面
+    folders.sort(key=lambda x: (0 if 'original' in x.lower() else 1, x))
     
-    if not center:
-        H.remove_node(n)
+    print(f"检测到 {len(folders)} 个异常用户文件夹:")
+    for folder in folders:
+        print(f"  - {folder}")
     
-    return H
+    return folders
 
-def bidirectional_bfs(G, start_node, radius):
-    """双向BFS：同时沿入边和出边扩展"""
-    distances = {start_node: 0}
-    current_level = {start_node}
+def parse_folder_info(folder_name):
+    """解析文件夹名称，提取方法和排除比例信息"""
+    if 'original_network' in folder_name.lower():
+        return {
+            'exclude_pct': 0.0,
+            'methods': ['original'],
+            'description': '原始网络',
+            'short_name': 'Original',
+            'folder_name': folder_name
+        }
     
-    for level in range(1, radius + 1):
-        next_level = set()
+    # 解析advanced_method1_2_3_10.0pct格式
+    match = re.search(r'advanced_(.+?)_(\d+(?:\.\d+)?)pct', folder_name)
+    if match:
+        methods_part = match.group(1)
+        exclude_pct = float(match.group(2))
         
-        for node in current_level:
-            # 出边邻居（node关注的人）
-            for successor in G.successors(node):
-                if successor not in distances:
-                    distances[successor] = level
-                    next_level.add(successor)
-            
-            # 入边邻居（关注node的人）
-            for predecessor in G.predecessors(node):
-                if predecessor not in distances:
-                    distances[predecessor] = level
-                    next_level.add(predecessor)
+        # 提取方法编号
+        methods = re.findall(r'method(\d+)', methods_part)
+        method_names = [f"method{m}" for m in methods]
         
-        current_level = next_level
-        if not current_level:
-            break
+        # 创建简短清晰的名称
+        short_name = f"排除{exclude_pct}%"
+        
+        return {
+            'exclude_pct': exclude_pct,
+            'methods': method_names,
+            'description': f'排除前{exclude_pct}%异常用户（方法: {", ".join(method_names)}）',
+            'short_name': short_name,
+            'folder_name': folder_name
+        }
     
-    return distances
+    # 如果解析失败，返回默认值
+    return {
+        'exclude_pct': -1,
+        'methods': ['unknown'],
+        'description': f'未知配置（{folder_name}）',
+        'short_name': folder_name[:10],
+        'folder_name': folder_name
+    }
 
-def calculate_spectral_radius(G):
-    """计算图的谱半径（最大特征值的绝对值）"""
-    adj_matrix = eg.to_numpy_array(G)
-    eigenvalues = linalg.eigvals(adj_matrix)
-    return float(np.max(np.abs(eigenvalues)))
+def load_abnormal_users_from_folder(folder_name):
+    """从指定文件夹加载异常用户列表"""
+    abnormal_file = f'results/pick_out_abnormal_users/{folder_name}/abnormal_users.csv'
+    
+    if not os.path.exists(abnormal_file):
+        print(f"警告: 未找到文件 {abnormal_file}")
+        return set()
+    
+    try:
+        abnormal_df = pd.read_csv(abnormal_file)
+        if len(abnormal_df) == 0:
+            print(f"  - 加载了 0 个异常用户（{folder_name}）")
+            return set()
+        
+        abnormal_users = set(abnormal_df['user_id'].apply(normalize_id))
+        print(f"  - 加载了 {len(abnormal_users)} 个异常用户（{folder_name}）")
+        return abnormal_users
+    except Exception as e:
+        print(f"加载异常用户文件出错 {abnormal_file}: {e}")
+        return set()
 
-def calculate_modularity(G):
-    """计算图的模块度"""
-    partition, modularity_value = louvain_communities_fixed(G, threshold=0.001)
-    return modularity_value
+def detect_network_features(merged_df):
+    """🔥 新增：自动检测数据中的网络特征，排除非分析字段"""
+    # 需要排除的字段
+    excluded_columns = {
+        'user_id',           # 用户ID
+        'center_node',       # 中心节点（与user_id重复）
+        'avg_popularity',    # 🔥 修改：影响力Y1（10条平均）
+        'avg_popularity_of_all',  # 🔥 新增：影响力Y2（总体平均）
+        'is_celebrity'       # 明星用户标识（非网络指标）
+    }
+    
+    # 🔥 自动检测所有可分析的网络特征
+    network_features = []
+    for col in merged_df.columns:
+        if col not in excluded_columns:
+            # 检查是否为数值型
+            if pd.api.types.is_numeric_dtype(merged_df[col]):
+                network_features.append(col)
+    
+    # 按照重要性排序（优先显示传统的6大网络指标）
+    priority_order = [
+        'density', 'clustering_coefficient', 'average_nearest_neighbor_degree',
+        'betweenness_centrality', 'spectral_radius', 'modularity',
+        'global_out_degree', 'global_in_degree', 'global_total_degree',
+        'node_count', 'edge_count'
+    ]
+    
+    # 重新排序：优先级特征在前，其他特征在后
+    ordered_features = []
+    for feature in priority_order:
+        if feature in network_features:
+            ordered_features.append(feature)
+            
+    # 添加其他未在优先级列表中的特征
+    for feature in network_features:
+        if feature not in ordered_features:
+            ordered_features.append(feature)
+    
+    print(f"\n🔍 自动检测到 {len(ordered_features)} 个可分析的网络特征:")
+    
+    # 🔥 新增：按类别显示特征
+    traditional_features = [f for f in ordered_features if f in priority_order[:6]]
+    degree_features = [f for f in ordered_features if f in priority_order[6:9]]
+    network_size_features = [f for f in ordered_features if f in priority_order[9:11]]
+    other_features = [f for f in ordered_features if f not in priority_order]
+    
+    if traditional_features:
+        print(f"  📊 传统网络指标 ({len(traditional_features)}个): {', '.join(traditional_features)}")
+    if degree_features:
+        print(f"  🔗 度数指标 ({len(degree_features)}个): {', '.join(degree_features)}")
+    if network_size_features:
+        print(f"  📏 网络规模指标 ({len(network_size_features)}个): {', '.join(network_size_features)}")
+    if other_features:
+        print(f"  ➕ 其他指标 ({len(other_features)}个): {', '.join(other_features)}")
+    
+    return ordered_features
 
-def louvain_communities_fixed(G, weight="weight", threshold=0.001, max_iterations=100, max_levels=10):
-    """修复版的Louvain社区检测算法"""
-    partition = [{u} for u in G.nodes]
-    m = G.size(weight="weight")
-    is_directed = G.is_directed()
+# 🔥 新增：影响力指标选择函数
+def choose_popularity_metric(merged_df):
+    """让用户选择要分析的影响力指标"""
+    available_metrics = []
     
-    initial_mod = modularity_fixed(G, partition)
+    # 检查可用的影响力指标
+    if 'avg_popularity' in merged_df.columns:
+        available_metrics.append(('avg_popularity', 'Y1: 最新10条微博转赞评平均值'))
     
-    level = 1
-    partition, inner_partition, improvement = _one_level_fixed(G, m, partition, is_directed)
+    if 'avg_popularity_of_all' in merged_df.columns:
+        available_metrics.append(('avg_popularity_of_all', 'Y2: 总体微博转赞评平均值'))
     
-    new_mod = modularity_fixed(G, partition)
-    mod_gain = new_mod - initial_mod
+    if len(available_metrics) == 0:
+        print("❌ 未找到任何影响力指标列")
+        return None
     
-    while improvement and level < max_levels:
-        level += 1
+    if len(available_metrics) == 1:
+        metric_name, metric_desc = available_metrics[0]
+        print(f"✅ 只检测到一种影响力指标: {metric_desc}")
+        return metric_name
+    
+    # 有多个指标，让用户选择
+    print(f"\n🎯 检测到多种影响力指标，请选择要分析的目标变量:")
+    print("=" * 60)
+    for i, (metric_name, metric_desc) in enumerate(available_metrics, 1):
+        # 显示统计信息
+        non_zero_count = (merged_df[metric_name] > 0).sum()
+        total_count = len(merged_df)
+        mean_value = merged_df[metric_name].mean()
+        max_value = merged_df[metric_name].max()
         
-        G_new = G.__class__()
-        node2com = {}
-        
-        for i, part in enumerate(partition):
-            G_new.add_node(i)
-            for node in part:
-                node2com[node] = i
-        
-        for edge in G.edges:
-            u, v, data = edge
-            if u in node2com and v in node2com:
-                com1 = node2com[u]
-                com2 = node2com[v]
-                edge_weight = data.get(weight, 1)
-                
-                if G_new.has_edge(com1, com2):
-                    G_new[com1][com2][weight] += edge_weight
-                else:
-                    G_new.add_edge(com1, com2, **{weight: edge_weight})
-        
-        G = G_new
-        partition = [{u} for u in G.nodes]
-        partition, inner_partition, improvement = _one_level_fixed(G, m, partition, is_directed)
-        
-        if improvement:
-            cur_mod = modularity_fixed(G, partition)
-            mod_gain = cur_mod - new_mod
-            
-            if mod_gain <= threshold:
-                break
-            new_mod = cur_mod
+        print(f"{i}. {metric_desc}")
+        print(f"   📊 非零用户: {non_zero_count}/{total_count} ({non_zero_count/total_count*100:.1f}%)")
+        print(f"   📊 平均值: {mean_value:.2f}, 最大值: {max_value:.2f}")
+        print()
     
-    return partition, new_mod
-
-def _one_level_fixed(G, m, partition, is_directed=False, max_iterations=100):
-    """修复版的_one_level函数"""
-    node2com = {u: i for i, u in enumerate(G.nodes)}
-    inner_partition = [{u} for u in G.nodes]
+    print("3. 同时分析两种指标（生成对比报告）")
+    print("=" * 60)
     
-    degrees = dict(G.degree(weight="weight"))
-    Stot = []
-    for i in range(len(partition)):
-        Stot.append(sum(degrees.get(node, 0) for node in partition[i]))
-    
-    nbrs = {u: {v: data.get("weight", 1) for v, data in G[u].items() if v != u} for u in G}
-    rand_nodes = list(G.nodes)
-    
-    nb_moves = 1
-    iteration = 0
-    total_moves = 0
-    recent_moves = []
-    oscillation_threshold = 3
-    
-    while nb_moves > 0 and iteration < max_iterations:
-        iteration += 1
-        nb_moves = 0
-        
-        for u in rand_nodes:
-            best_mod = 0
-            best_com = node2com[u]
-            
-            weights2com = defaultdict(float)
-            for nbr, wt in nbrs.get(u, {}).items():
-                weights2com[node2com[nbr]] += wt
-            
-            degree = degrees.get(u, 0)
-            if best_com < len(Stot):
-                Stot[best_com] -= degree
-                remove_cost = -weights2com.get(best_com, 0) / m + (Stot[best_com] * degree) / (2 * m**2)
-            else:
-                remove_cost = 0
-            
-            for nbr_com, wt in weights2com.items():
-                if nbr_com < len(Stot):
-                    gain = remove_cost + wt / m - (Stot[nbr_com] * degree) / (2 * m**2)
-                    if gain > best_mod:
-                        best_mod = gain
-                        best_com = nbr_com
-            
-            if best_com < len(Stot):
-                Stot[best_com] += degree
-            
-            if best_com != node2com[u]:
-                com = G.nodes[u].get("nodes", {u})
-                if not isinstance(com, set):
-                    com = {com}
-                
-                partition[node2com[u]].difference_update(com)
-                inner_partition[node2com[u]].remove(u)
-                
-                if best_com < len(partition):
-                    partition[best_com].update(com)
-                    inner_partition[best_com].add(u)
-                
-                nb_moves += 1
-                total_moves += 1
-                node2com[u] = best_com
-        
-        old_partition = partition.copy()
-        partition = list(filter(len, partition))
-        inner_partition = list(filter(len, inner_partition))
-        
-        if len(old_partition) != len(partition):
-            new_node2com = {}
-            for i, community in enumerate(partition):
-                for node in community:
-                    new_node2com[node] = i
-            node2com = new_node2com
-            
-            new_Stot = []
-            for i in range(len(partition)):
-                new_Stot.append(sum(degrees.get(node, 0) for node in partition[i]))
-            Stot = new_Stot
-        
-        recent_moves.append(nb_moves)
-        if len(recent_moves) > oscillation_threshold:
-            recent_moves.pop(0)
-            if len(set(recent_moves)) == 1 and recent_moves[0] > 0:
-                break
-    
-    return partition, inner_partition, total_moves > 0
-
-def modularity_fixed(G, communities, weight="weight"):
-    """计算给定社区划分的模块度"""
-    if not isinstance(communities, list):
-        communities = list(communities)
-
-    directed = G.is_directed()
-    m = G.size(weight=weight)
-    if m == 0:
-        return 0
-        
-    if directed:
-        out_degree = dict(G.out_degree(weight=weight))
-        in_degree = dict(G.in_degree(weight=weight))
-        norm = 1 / m
-    else:
-        out_degree = dict(G.degree(weight=weight))
-        in_degree = out_degree
-        norm = 1 / (2 * m)
-    
-    def val(u, v):
+    while True:
         try:
-            w = G[u][v].get(weight, 1)
-        except KeyError:
-            w = 0
-        if u == v and not directed:
-            w *= 2
-        return w - in_degree.get(u, 0) * out_degree.get(v, 0) * norm
-    
-    Q = 0
-    for c in communities:
-        for u in c:
-            for v in c:
-                Q += val(u, v)
-    
-    Q = Q * norm
-    
-    print(f"  - 社区数量: {len(communities)}")
-    print(f"  - 最终模块度: {Q:.6f}")
-    
-    return Q
-
-def calculate_average_neighbor_degree(G, node):
-    """计算节点的邻居平均度数"""
-    neighbors = list(G.neighbors(node))
-    if not neighbors:
-        return 0.0
-    
-    neighbor_degrees = []
-    for neighbor in neighbors:
-        deg_val = len(list(G.neighbors(neighbor)))
-        neighbor_degrees.append(deg_val)
-    
-    return sum(neighbor_degrees) / len(neighbor_degrees)
-
-def create_ego_network_fixed(G, node, radius=2):
-    """使用修复版ego_graph创建真正的双向二跳邻居网络"""
-    print(f"  - 开始创建真正的双向二跳邻居网络...")
-    
-    # 使用修复版的ego_graph函数，设置undirected=True以获取双向边
-    ego_graph = ego_graph_fixed(G, node, radius=radius, center=True, undirected=True)
-    
-    if ego_graph:
-        print(f"  - 双向ego_graph创建成功: {ego_graph.number_of_nodes()} 节点, {ego_graph.number_of_edges()} 边")
-        
-        # 验证中心节点的邻居情况
-        if node in ego_graph:
-            # 对于有向图，计算入邻居和出邻居
-            if G.is_directed():
-                in_neighbors = []
-                out_neighbors = []
-                
-                # 在原图中查找中心节点的真实邻居
-                for u in G.nodes:
-                    if G.has_edge(u, node):  # u指向node（入邻居）
-                        in_neighbors.append(u)
-                    if G.has_edge(node, u):  # node指向u（出邻居）
-                        out_neighbors.append(u)
-                
-                # 过滤：只统计在ego_graph中的邻居
-                in_neighbors_in_ego = [n for n in in_neighbors if n in ego_graph]
-                out_neighbors_in_ego = [n for n in out_neighbors if n in ego_graph]
-                
-                print(f"  - 中心节点 {node}: 入邻居(粉丝) {len(in_neighbors_in_ego)} 个, 出邻居(关注) {len(out_neighbors_in_ego)} 个")
+            choice = input("请选择 (1/2/3): ").strip()
+            if choice == '1':
+                return available_metrics[0][0]
+            elif choice == '2':
+                return available_metrics[1][0]
+            elif choice == '3':
+                return 'both'  # 特殊标识，表示分析两种指标
             else:
-                neighbors = list(ego_graph.neighbors(node))
-                print(f"  - 中心节点 {node}: 邻居 {len(neighbors)} 个")
-    
-    return ego_graph
+                print("请输入有效选项 (1/2/3)")
+        except KeyboardInterrupt:
+            print("\n❌ 用户取消操作")
+            return None
 
-def calculate_network_metrics_fixed(ego_graph, center_node):
-    """计算网络的六个指标"""
-    metrics = {}
+def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_info, popularity_metric):
+    """🔥 修改版：支持选择不同的影响力指标进行相关性计算"""
+    merged_df['user_id'] = merged_df['user_id'].apply(normalize_id)
+    filtered_df = merged_df[~merged_df['user_id'].isin(abnormal_users)].copy()
     
-    # 基本网络信息
-    metrics['node_count'] = ego_graph.number_of_nodes()
-    metrics['edge_count'] = ego_graph.number_of_edges()
-    metrics['center_node'] = center_node
+    print(f"  - 原始用户数: {len(merged_df)}")
+    print(f"  - 排除异常用户数: {len(abnormal_users)}")
+    print(f"  - 剩余正常用户数: {len(filtered_df)}")
     
-    # 密度
-    metrics['density'] = eg.density(ego_graph)
-    print(f"  - 密度计算完成: {metrics['density']:.6f}")
+    if len(filtered_df) < 10:
+        print(f"  - 警告: 剩余用户数过少 ({len(filtered_df)})，可能影响相关性分析的可靠性")
     
-    # 聚类系数
-    metrics['clustering_coefficient'] = eg_f.clustering(ego_graph, center_node)
-    print(f"  - 聚类系数计算完成: {metrics['clustering_coefficient']:.6f}")
+    # 🔥 关键修改：自动检测网络特征
+    network_features = detect_network_features(filtered_df)
     
-    # 邻居平均度
-    metrics['average_nearest_neighbor_degree'] = calculate_average_neighbor_degree(ego_graph, center_node)
-    print(f"  - 邻居平均度计算完成: {metrics['average_nearest_neighbor_degree']:.6f}")
+    if not network_features:
+        print(f"  - 错误: 未检测到任何可分析的网络特征")
+        return {}, len(merged_df), len(abnormal_users), len(filtered_df)
     
-    # 介数中心性
-    bc_start = datetime.now()
-    bc = eg_f.betweenness_centrality(ego_graph)
-    if isinstance(bc, list):
-        node_list = list(ego_graph.nodes)
-        center_index = node_list.index(center_node)
-        metrics['ego_betweenness'] = bc[center_index]
-    else:
-        metrics['ego_betweenness'] = bc[center_node]
-    bc_time = datetime.now() - bc_start
-    print(f"  - 介数中心性计算完成: {metrics['ego_betweenness']:.6f}, 耗时: {bc_time}")
+    # 🔥 新增：验证选择的影响力指标
+    if popularity_metric not in filtered_df.columns:
+        print(f"  - 错误: 选择的影响力指标 {popularity_metric} 不在数据中")
+        return {}, len(merged_df), len(abnormal_users), len(filtered_df)
     
-    # 谱半径
-    sr_start = datetime.now()
-    metrics['spectral_radius'] = calculate_spectral_radius(ego_graph)
-    sr_time = datetime.now() - sr_start
-    print(f"  - 谱半径计算完成: {metrics['spectral_radius']:.6f}, 耗时: {sr_time}")
+    print(f"  - 使用影响力指标: {popularity_metric}")
     
-    # 模块度
-    mod_start = datetime.now()
-    metrics['modularity'] = calculate_modularity(ego_graph)
-    mod_time = datetime.now() - mod_start
-    print(f"  - 模块度计算完成: {metrics['modularity']:.6f}, 耗时: {mod_time}")
+    # 计算相关性
+    correlations = {}
     
-    return metrics
+    for feature in network_features:
+        if feature not in filtered_df.columns:
+            print(f"  - 警告: 特征 {feature} 不在数据中")
+            correlations[feature] = {
+                'spearman_corr': np.nan,
+                'spearman_p': np.nan,
+                'kendall_corr': np.nan,
+                'kendall_p': np.nan
+            }
+            continue
+        
+        try:
+            # 检查是否有有效数据
+            valid_mask = (~pd.isna(filtered_df[feature])) & (~pd.isna(filtered_df[popularity_metric]))
+            valid_feature = filtered_df.loc[valid_mask, feature]
+            valid_popularity = filtered_df.loc[valid_mask, popularity_metric]
+            
+            if len(valid_feature) < 3:
+                print(f"  - 警告: 特征 {feature} 有效数据点过少 ({len(valid_feature)})")
+                correlations[feature] = {
+                    'spearman_corr': np.nan,
+                    'spearman_p': np.nan,
+                    'kendall_corr': np.nan,
+                    'kendall_p': np.nan
+                }
+                continue
+            
+            # 计算Spearman相关系数
+            spearman_corr, spearman_p = stats.spearmanr(valid_feature, valid_popularity)
+            
+            # 计算Kendall相关系数
+            kendall_corr, kendall_p = stats.kendalltau(valid_feature, valid_popularity)
+            
+            correlations[feature] = {
+                'spearman_corr': spearman_corr,
+                'spearman_p': spearman_p,
+                'kendall_corr': kendall_corr,
+                'kendall_p': kendall_p
+            }
+            
+            print(f"  - {feature}: Spearman={spearman_corr:.4f}(p={spearman_p:.4f}), Kendall={kendall_corr:.4f}(p={kendall_p:.4f})")
+            
+        except Exception as e:
+            print(f"  - 计算 {feature} 相关性时出错: {e}")
+            correlations[feature] = {
+                'spearman_corr': np.nan,
+                'spearman_p': np.nan,
+                'kendall_corr': np.nan,
+                'kendall_p': np.nan
+            }
+    
+    return correlations, len(merged_df), len(abnormal_users), len(filtered_df)
 
-def save_ego_networks_info(ego_networks_info, output_path):
-    """保存二跳邻居网络信息到JSONL文件"""
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for user_id, info in ego_networks_info.items():
-            record = {"user_id": user_id, "ego_network_info": info}
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"二跳邻居网络信息已保存到: {output_path}")
+def save_results(correlations, original_count, excluded_count, remaining_count, 
+                folder_info, output_dir, popularity_metric):
+    """🔥 修改版：保存分析结果，支持不同影响力指标"""
+    result_dir = os.path.join(output_dir, folder_info['folder_name'])
+    ensure_dir(result_dir)
+    
+    # 🔥 新增：根据影响力指标调整文件名
+    metric_suffix = ""
+    if popularity_metric == 'avg_popularity':
+        metric_suffix = "_y1_recent10"
+    elif popularity_metric == 'avg_popularity_of_all':
+        metric_suffix = "_y2_total"
+    
+    # 保存详细的相关性结果到CSV
+    results_data = []
+    for feature, corr_data in correlations.items():
+        results_data.append({
+            'feature': feature,
+            'spearman_correlation': corr_data['spearman_corr'],
+            'spearman_p_value': corr_data['spearman_p'],
+            'kendall_correlation': corr_data['kendall_corr'],
+            'kendall_p_value': corr_data['kendall_p']
+        })
+    
+    results_df = pd.DataFrame(results_data)
+    csv_path = os.path.join(result_dir, f'correlation_results{metric_suffix}.csv')
+    results_df.to_csv(csv_path, index=False)
+    
+    # 保存汇总报告到TXT
+    txt_path = os.path.join(result_dir, f'analysis_summary{metric_suffix}.txt')
+    
+    # 🔥 新增：影响力指标描述
+    metric_descriptions = {
+        'avg_popularity': 'Y1: 最新10条微博转赞评平均值',
+        'avg_popularity_of_all': 'Y2: 总体微博转赞评平均值'
+    }
+    metric_desc = metric_descriptions.get(popularity_metric, popularity_metric)
+    
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(f"====== {folder_info['description']} 相关性分析结果 ======\n")
+        f.write(f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"检测方法: {', '.join(folder_info['methods'])}\n")
+        f.write(f"排除比例: {folder_info['exclude_pct']}%\n")
+        f.write(f"影响力指标: {metric_desc}\n\n")  # 🔥 新增
+        
+        f.write(f"=== 数据统计 ===\n")
+        f.write(f"原始用户总数: {original_count}\n")
+        f.write(f"排除异常用户数: {excluded_count}\n")
+        f.write(f"剩余正常用户数: {remaining_count}\n")
+        f.write(f"排除比例: {excluded_count/original_count*100:.2f}%\n")
+        f.write(f"保留比例: {remaining_count/original_count*100:.2f}%\n\n")
+        
+        # 🔥 修改：动态标题，支持任意数量的特征
+        f.write(f"=== 网络特征与{metric_desc}相关性分析 (共{len(correlations)}个特征) ===\n")
+        f.write(f"{'特征名称':<35} {'Spearman相关系数':<18} {'Spearman P值':<15} {'Kendall相关系数':<17} {'Kendall P值':<15} {'显著性'}\n")
+        f.write("-" * 120 + "\n")
+        
+        for feature, corr_data in correlations.items():
+            spearman_sig = "显著" if not pd.isna(corr_data['spearman_p']) and corr_data['spearman_p'] < 0.05 else "不显著"
+            kendall_sig = "显著" if not pd.isna(corr_data['kendall_p']) and corr_data['kendall_p'] < 0.05 else "不显著"
+            
+            # 综合显著性判断
+            overall_sig = "显著" if (spearman_sig == "显著" or kendall_sig == "显著") else "不显著"
+            
+            f.write(f"{feature:<35} "
+                   f"{corr_data['spearman_corr']:<18.4f} "
+                   f"{corr_data['spearman_p']:<15.4f} "
+                   f"{corr_data['kendall_corr']:<17.4f} "
+                   f"{corr_data['kendall_p']:<15.4f} "
+                   f"{overall_sig}\n")
+        
+        f.write(f"\n=== 分析说明 ===\n")
+        f.write(f"1. 使用检测方法: {', '.join(folder_info['methods'])}\n")
+        f.write(f"2. 排除比例: {folder_info['exclude_pct']}%\n")
+        f.write(f"3. 影响力指标: {metric_desc}\n")
+        f.write(f"4. 自动检测到 {len(correlations)} 个网络特征进行分析\n")
+        f.write(f"5. Spearman相关系数衡量单调关系，Kendall相关系数衡量序列一致性\n")
+        f.write(f"6. P值<0.05认为相关性显著\n")
+        f.write(f"7. 相关系数绝对值越大，表示相关性越强\n")
+        f.write(f"8. 已自动排除非分析字段: user_id, center_node, avg_popularity, avg_popularity_of_all, is_celebrity\n")
+    
+    print(f"  - 结果已保存到: {result_dir}")
+    return csv_path, txt_path
 
-def save_metrics_to_jsonl(metrics_data, output_path):
-    """保存网络指标到JSONL文件"""
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for user_id, metrics in metrics_data.items():
-            record = {"user_id": user_id, "network_metrics": metrics}
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"指标数据已保存到: {output_path}")
-
-def metrics_to_dataframe(metrics_data):
-    """将指标数据转换为DataFrame格式"""
-    records = []
-    for user_id, metrics in metrics_data.items():
-        record = {"user_id": user_id}
-        record.update(metrics)
-        records.append(record)
-    return pd.DataFrame(records)
+# 🔥 新增：双重分析功能
+def analyze_both_metrics(merged_df, abnormal_folders, output_dir):
+    """同时分析两种影响力指标并生成对比报告"""
+    
+    if 'avg_popularity' not in merged_df.columns or 'avg_popularity_of_all' not in merged_df.columns:
+        print("❌ 数据中缺少完整的双重影响力指标，无法进行对比分析")
+        return
+    
+    print(f"\n🔄 开始双重影响力指标对比分析...")
+    
+    all_results_y1 = {}
+    all_results_y2 = {}
+    
+    # 分别分析两种指标
+    for folder_name in abnormal_folders:
+        print(f"\n{'='*60}")
+        folder_info = parse_folder_info(folder_name)
+        print(f"分析配置: {folder_info['description']}")
+        
+        # 加载异常用户列表
+        abnormal_users = load_abnormal_users_from_folder(folder_name)
+        
+        # 分析Y1（最新10条）
+        print(f"  📊 分析Y1: 最新10条微博影响力...")
+        correlations_y1, original_count, excluded_count, remaining_count = calculate_correlations_without_abnormal(
+            merged_df, abnormal_users, folder_info, 'avg_popularity')
+        
+        # 分析Y2（总体）
+        print(f"  📊 分析Y2: 总体微博影响力...")
+        correlations_y2, _, _, _ = calculate_correlations_without_abnormal(
+            merged_df, abnormal_users, folder_info, 'avg_popularity_of_all')
+        
+        # 保存结果
+        save_results(correlations_y1, original_count, excluded_count, remaining_count, 
+                    folder_info, output_dir, 'avg_popularity')
+        save_results(correlations_y2, original_count, excluded_count, remaining_count, 
+                    folder_info, output_dir, 'avg_popularity_of_all')
+        
+        # 存储结果用于对比
+        all_results_y1[folder_name] = {
+            'folder_info': folder_info,
+            'correlations': correlations_y1,
+            'counts': (original_count, excluded_count, remaining_count)
+        }
+        all_results_y2[folder_name] = {
+            'folder_info': folder_info,
+            'correlations': correlations_y2,
+            'counts': (original_count, excluded_count, remaining_count)
+        }
+    
+    # 🔥 生成双重指标对比汇总报告
+    print(f"\n🔄 生成双重影响力指标对比汇总报告...")
+    
+    comparison_path = os.path.join(output_dir, 'dual_metrics_comparison_summary.txt')
+    with open(comparison_path, 'w', encoding='utf-8') as f:
+        f.write("====== 双重影响力指标相关性分析对比汇总 ======\n")
+        f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("=== 影响力指标说明 ===\n")
+        f.write("Y1 (avg_popularity): 最新10条微博转赞评平均值\n")
+        f.write("Y2 (avg_popularity_of_all): 总体微博转赞评平均值\n\n")
+        
+        # 配置概览
+        f.write("=== 分析配置概览 ===\n")
+        for i, folder_name in enumerate(abnormal_folders, 1):
+            folder_info = all_results_y1[folder_name]['folder_info']
+            f.write(f"{i}. {folder_info['short_name']}: {folder_info['description']}\n")
+        f.write("\n")
+        
+        # 获取所有特征
+        all_features = set()
+        for folder_name in abnormal_folders:
+            all_features.update(all_results_y1[folder_name]['correlations'].keys())
+        features = sorted(list(all_features))
+        
+        # Y1 vs Y2 Spearman相关系数对比
+        f.write(f"=== Y1 vs Y2 Spearman相关系数对比 (共{len(features)}个特征) ===\n")
+        
+        # Y1数据
+        f.write(f"\n--- Y1 (最新10条) Spearman相关系数 ---\n")
+        header = f"{'特征':<35} "
+        for folder_name in abnormal_folders:
+            folder_info = all_results_y1[folder_name]['folder_info']
+            header += f"{folder_info['short_name']:<15} "
+        f.write(header + "\n")
+        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        
+        for feature in features:
+            line = f"{feature:<35} "
+            for folder_name in abnormal_folders:
+                if feature in all_results_y1[folder_name]['correlations']:
+                    corr = all_results_y1[folder_name]['correlations'][feature]['spearman_corr']
+                    if pd.isna(corr):
+                        line += f"{'N/A':<15}"
+                    else:
+                        line += f"{corr:<15.4f}"
+                else:
+                    line += f"{'N/A':<15}"
+            f.write(line + "\n")
+        
+        # Y2数据
+        f.write(f"\n--- Y2 (总体) Spearman相关系数 ---\n")
+        header = f"{'特征':<35} "
+        for folder_name in abnormal_folders:
+            folder_info = all_results_y2[folder_name]['folder_info']
+            header += f"{folder_info['short_name']:<15} "
+        f.write(header + "\n")
+        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        
+        for feature in features:
+            line = f"{feature:<35} "
+            for folder_name in abnormal_folders:
+                if feature in all_results_y2[folder_name]['correlations']:
+                    corr = all_results_y2[folder_name]['correlations'][feature]['spearman_corr']
+                    if pd.isna(corr):
+                        line += f"{'N/A':<15}"
+                    else:
+                        line += f"{corr:<15.4f}"
+                else:
+                    line += f"{'N/A':<15}"
+            f.write(line + "\n")
+        
+        # Y1 vs Y2差异分析
+        f.write(f"\n--- Y1 vs Y2 相关系数差异 (Y2 - Y1) ---\n")
+        header = f"{'特征':<35} "
+        for folder_name in abnormal_folders:
+            folder_info = all_results_y1[folder_name]['folder_info']
+            header += f"{folder_info['short_name']:<15} "
+        f.write(header + "\n")
+        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        
+        for feature in features:
+            line = f"{feature:<35} "
+            for folder_name in abnormal_folders:
+                corr_y1 = all_results_y1[folder_name]['correlations'].get(feature, {}).get('spearman_corr', np.nan)
+                corr_y2 = all_results_y2[folder_name]['correlations'].get(feature, {}).get('spearman_corr', np.nan)
+                
+                if pd.isna(corr_y1) or pd.isna(corr_y2):
+                    line += f"{'N/A':<15}"
+                else:
+                    diff = corr_y2 - corr_y1
+                    line += f"{diff:<15.4f}"
+            f.write(line + "\n")
+        
+        f.write(f"\n=== 分析说明 ===\n")
+        f.write(f"1. Y1适合分析近期活跃度与网络结构的关系\n")
+        f.write(f"2. Y2适合分析整体影响力与网络结构的关系\n")
+        f.write(f"3. 正差异表示Y2相关性更强，负差异表示Y1相关性更强\n")
+        f.write(f"4. 建议重点关注差异较大的特征，可能揭示不同时间尺度下的影响机制\n")
+    
+    print(f"✅ 双重指标对比汇总报告: {comparison_path}")
 
 def main():
     """主函数"""
     start_time = datetime.now()
-    print(f"开始分析时间: {start_time}")
-    print("使用修复版EasyGraph ego_graph，真正支持双向边")
+    print(f"开始双重影响力指标相关性分析...")
+    print(f"分析时间: {start_time}")
     
-    # 设置路径
-    base_dir = 'data/domain_networks/merged_network'
-    edges_path = os.path.join(base_dir, 'edges.csv')
-    popularity_path = os.path.join(base_dir, 'popularity.csv')
-    output_dir = 'results/merged_network_result_fixed'
-    metrics_output = os.path.join(output_dir, 'network_metrics.jsonl')
-    ego_networks_output = os.path.join(output_dir, 'ego_networks_info.jsonl')
+    # 🔥 修改：使用新的数据路径
+    merged_data_path = 'C:/Tengfei/data/results/user_3855570307_metrics/merged_metrics_popularity.csv'
     
-    # 确保输出目录存在
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if not os.path.exists(merged_data_path):
+        print(f"错误: 未找到合并数据文件 {merged_data_path}")
+        print("请先运行 create3.py 生成 merged_metrics_popularity.csv")
+        return
     
-    # 检查是否已经计算过网络指标
-    if os.path.exists(metrics_output):
-        print(f"找到已有的网络指标文件: {metrics_output}")
-        print("是否重新计算网络指标？(y/n)")
-        recalculate = input().lower() == 'y'
+    print(f"正在加载合并数据: {merged_data_path}")
+    try:
+        merged_df = pd.read_csv(merged_data_path)
+        print(f"成功加载数据，包含 {len(merged_df)} 个用户")
+    except Exception as e:
+        print(f"加载合并数据出错: {e}")
+        return
+    
+    # 🔥 修改：检查必要的列
+    required_columns = ['user_id']
+    
+    missing_columns = [col for col in required_columns if col not in merged_df.columns]
+    if missing_columns:
+        print(f"错误: 合并数据缺少必要的列: {missing_columns}")
+        return
+    
+    print(f"✅ 数据格式验证通过")
+    print(f"📊 数据包含列: {list(merged_df.columns)}")
+    
+    # 🔥 新增：选择影响力指标
+    print(f"\n{'='*60}")
+    print(f"选择影响力指标...")
+    popularity_metric = choose_popularity_metric(merged_df)
+    
+    if popularity_metric is None:
+        print("❌ 未选择影响力指标，程序退出")
+        return
+    
+    # 自动检测异常用户文件夹
+    print(f"\n{'='*60}")
+    print(f"自动检测异常用户文件夹...")
+    abnormal_folders = detect_abnormal_user_folders()
+    
+    if not abnormal_folders:
+        print("错误: 未找到任何异常用户文件夹")
+        print("请先运行 pick_out_abnormal_users.py 生成异常用户数据")
+        return
+    
+    # 创建输出目录
+    output_dir = 'results/correlation_result'
+    ensure_dir(output_dir)
+    
+    # 🔥 新增：根据选择的指标执行不同的分析
+    if popularity_metric == 'both':
+        # 双重分析模式
+        analyze_both_metrics(merged_df, abnormal_folders, output_dir)
     else:
-        recalculate = True
-    
-    # 加载数据、构建图并计算网络指标
-    if recalculate:
-        print("正在加载网络数据...")
-        edges_df = pd.read_csv(edges_path)
-        popularity_df = pd.read_csv(popularity_path)
+        # 单一指标分析模式
+        print(f"\n{'='*60}")
+        print(f"开始分析 {len(abnormal_folders)} 种配置下的相关性...")
+        print(f"使用影响力指标: {popularity_metric}")
         
-        # 预处理：规范化ID
-        print("正在规范化用户ID...")
-        source_id_map = {row['source']: normalize_id(row['source']) for _, row in edges_df.iterrows()}
-        target_id_map = {row['target']: normalize_id(row['target']) for _, row in edges_df.iterrows()}
-        edges_df['source'] = edges_df['source'].map(source_id_map)
-        edges_df['target'] = edges_df['target'].map(target_id_map)
+        all_results = {}
         
-        popularity_df['user_id'] = popularity_df['user_id'].apply(normalize_id)
-        
-        # 构建有向图
-        print("正在构建网络...")
-        G = eg.DiGraph()
-        edge_count = 0
-        for _, row in edges_df.iterrows():
-            source = str(row['source'])
-            target = str(row['target'])
-            G.add_edge(source, target)
-            edge_count += 1
-            if edge_count % 10000 == 0:
-                print(f"已加载 {edge_count} 条边")
-        
-        print(f"网络构建完成，包含 {G.number_of_nodes()} 个节点和 {G.number_of_edges()} 条边")
-        
-        # 计算每个用户的二跳邻居网络指标
-        print("正在计算用户网络指标...")
-        metrics_data = {}
-        ego_networks_info = {}
-        
-        # 获取需要计算的用户列表
-        users_to_process = set(popularity_df['user_id'].tolist())
-        users_in_graph = set(str(node) for node in G.nodes)
-        
-        valid_users = users_to_process.intersection(users_in_graph)
-        
-        print(f"\n=== 用户匹配统计 ===")
-        print(f"Popularity文件中用户总数: {len(users_to_process)}")
-        print(f"图中节点总数: {len(G.nodes)}")
-        print(f"有效匹配用户数: {len(valid_users)}")
-        print(f"匹配率: {len(valid_users)/len(users_to_process)*100:.2f}%")
-        
-        # 计算每个用户的指标
-        processed_count = 0
-        total_users = len(valid_users)
-        print(f"\n开始计算 {total_users} 个用户的网络指标...")
-        loop_start_time = datetime.now()
-        
-        for user_id in valid_users:
-            processed_count += 1
-            completion = processed_count / total_users * 100
-            print(f"\n处理用户 {user_id} (第{processed_count}/{total_users}个, 完成{completion:.1f}%):")
+        # 分析每个配置
+        for folder_name in abnormal_folders:
+            print(f"\n{'='*60}")
             
-            # 使用修复版ego_graph创建用户的二跳邻居网络
-            print(f"  - 开始创建双向二跳邻居网络...")
-            ego_start_time = datetime.now()
-            ego_graph = create_ego_network_fixed(G, user_id, radius=2)
-            ego_time = datetime.now() - ego_start_time
+            # 解析文件夹信息
+            folder_info = parse_folder_info(folder_name)
+            print(f"分析配置: {folder_info['description']}")
+            print(f"文件夹: {folder_name}")
+            print(f"{'='*60}")
             
-            if ego_graph and ego_graph.number_of_nodes() > 1:
-                print(f"  - 双向二跳邻居网络创建完成: {ego_graph.number_of_nodes()} 节点, {ego_graph.number_of_edges()} 边")
-                print(f"  - 耗时: {ego_time}")
-            else:
-                print(f"  - 双向二跳邻居网络创建失败或节点数过少，跳过此用户")
-                continue
+            # 加载异常用户列表
+            abnormal_users = load_abnormal_users_from_folder(folder_name)
             
-            # 计算网络指标
-            print(f"  - 开始计算网络指标...")
-            metrics_start_time = datetime.now()
-            metrics = calculate_network_metrics_fixed(ego_graph, user_id)
-            metrics_time = datetime.now() - metrics_start_time
-            print(f"  - 所有网络指标计算完成, 总耗时: {metrics_time}")
+            # 计算相关性
+            print(f"  - 开始计算相关性...")
+            correlations, original_count, excluded_count, remaining_count = calculate_correlations_without_abnormal(
+                merged_df, abnormal_users, folder_info, popularity_metric)
             
-            metrics_data[user_id] = metrics
+            # 保存结果
+            csv_path, txt_path = save_results(correlations, original_count, excluded_count, 
+                                            remaining_count, folder_info, output_dir, popularity_metric)
             
-            # 存储二跳邻居网络信息
-            ego_networks_info[user_id] = {
-                'node_count': ego_graph.number_of_nodes(),
-                'edge_count': ego_graph.number_of_edges(),
-                'nodes': list(ego_graph.nodes),
-                'metrics': {
-                    'density': metrics['density'],
-                    'clustering_coefficient': metrics['clustering_coefficient'],
-                    'average_nearest_neighbor_degree': metrics['average_nearest_neighbor_degree'],
-                    'ego_betweenness': metrics['ego_betweenness'],
-                    'spectral_radius': metrics['spectral_radius'],
-                    'modularity': metrics['modularity']
-                }
+            # 存储结果用于后续比较
+            all_results[folder_name] = {
+                'folder_info': folder_info,
+                'correlations': correlations,
+                'original_count': original_count,
+                'excluded_count': excluded_count,
+                'remaining_count': remaining_count
             }
+        
+        # 🔥 修改：生成单一指标对比汇总报告
+        print(f"\n{'='*60}")
+        print(f"生成对比汇总报告...")
+        
+        # 文件名包含指标标识
+        metric_suffix = "_y1" if popularity_metric == 'avg_popularity' else "_y2"
+        summary_path = os.path.join(output_dir, f'comprehensive_comparison_summary{metric_suffix}.txt')
+        
+        metric_descriptions = {
+            'avg_popularity': 'Y1: 最新10条微博转赞评平均值',
+            'avg_popularity_of_all': 'Y2: 总体微博转赞评平均值'
+        }
+        metric_desc = metric_descriptions.get(popularity_metric, popularity_metric)
+        
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write("====== 异常用户筛选相关性分析综合对比汇总 ======\n")
+            f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"影响力指标: {metric_desc}\n\n")
             
-            # 每处理100个用户保存一次中间结果
-            if processed_count % 100 == 0:
-                save_metrics_to_jsonl(metrics_data, metrics_output)
-                save_ego_networks_info(ego_networks_info, ego_networks_output)
-                print(f"  - 已保存中间结果 ({processed_count}/{total_users})")
+            # 其余内容与原版相同...
+            # 配置概览
+            f.write("=== 分析配置概览 ===\n")
+            for i, folder_name in enumerate(abnormal_folders, 1):
+                folder_info = all_results[folder_name]['folder_info']
+                f.write(f"{i}. {folder_info['short_name']}: {folder_info['description']}\n")
+            f.write("\n")
+            
+            # 数据量对比
+            f.write("=== 数据量对比 ===\n")
+            f.write(f"{'配置':<15} {'原始用户数':<12} {'排除用户数':<12} {'剩余用户数':<12} {'排除比例':<10} {'保留比例'}\n")
+            f.write("-" * 75 + "\n")
+            for folder_name in abnormal_folders:
+                result = all_results[folder_name]
+                folder_info = result['folder_info']
+                exclude_pct = result['excluded_count'] / result['original_count'] * 100
+                remain_pct = result['remaining_count'] / result['original_count'] * 100
+                
+                f.write(f"{folder_info['short_name']:<15} {result['original_count']:<12} {result['excluded_count']:<12} "
+                       f"{result['remaining_count']:<12} {exclude_pct:<10.2f}% {remain_pct:.2f}%\n")
+            
+            # 获取所有特征进行对比
+            all_features = set()
+            for folder_name in abnormal_folders:
+                all_features.update(all_results[folder_name]['correlations'].keys())
+            
+            features = sorted(list(all_features))
+            
+            f.write(f"\n=== Spearman相关系数对比 (共{len(features)}个特征) ===\n")
+            # 构建列标题
+            header = f"{'特征':<35} "
+            for folder_name in abnormal_folders:
+                folder_info = all_results[folder_name]['folder_info']
+                header += f"{folder_info['short_name']:<15} "
+            f.write(header + "\n")
+            f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+            
+            for feature in features:
+                line = f"{feature:<35} "
+                for folder_name in abnormal_folders:
+                    if feature in all_results[folder_name]['correlations']:
+                        corr = all_results[folder_name]['correlations'][feature]['spearman_corr']
+                        if pd.isna(corr):
+                            line += f"{'N/A':<15}"
+                        else:
+                            line += f"{corr:<15.4f}"
+                    else:
+                        line += f"{'N/A':<15}"
+                f.write(line + "\n")
+            
+            f.write(f"\n=== Kendall相关系数对比 (共{len(features)}个特征) ===\n")
+            # 构建列标题
+            header = f"{'特征':<35} "
+            for folder_name in abnormal_folders:
+                folder_info = all_results[folder_name]['folder_info']
+                header += f"{folder_info['short_name']:<15} "
+            f.write(header + "\n")
+            f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+            
+            for feature in features:
+                line = f"{feature:<35} "
+                for folder_name in abnormal_folders:
+                    if feature in all_results[folder_name]['correlations']:
+                        corr = all_results[folder_name]['correlations'][feature]['kendall_corr']
+                        if pd.isna(corr):
+                            line += f"{'N/A':<15}"
+                        else:
+                            line += f"{corr:<15.4f}"
+                    else:
+                        line += f"{'N/A':<15}"
+                f.write(line + "\n")
+            
+            f.write(f"\n=== 分析说明 ===\n")
+            f.write(f"1. 分析的影响力指标: {metric_desc}\n")
+            f.write(f"2. 自动检测并分析了 {len(features)} 个网络特征\n")
+            f.write(f"3. 已排除非分析字段: user_id, center_node, avg_popularity, avg_popularity_of_all, is_celebrity\n")
+            f.write(f"4. Original: 原始网络，未排除任何用户\n")
+            for folder_name in abnormal_folders:
+                folder_info = all_results[folder_name]['folder_info']
+                if folder_info['exclude_pct'] > 0:
+                    f.write(f"5. {folder_info['short_name']}: 排除前{folder_info['exclude_pct']}%异常用户\n")
         
-        # 保存最终结果
-        save_metrics_to_jsonl(metrics_data, metrics_output)
-        save_ego_networks_info(ego_networks_info, ego_networks_output)
-        
-        loop_duration = datetime.now() - loop_start_time
-        print(f"\n用户处理循环完成，总耗时: {loop_duration}")
-        print(f"平均每个用户处理时间: {loop_duration.total_seconds() / max(1, len(metrics_data)):.2f} 秒")
-        print(f"已计算 {len(metrics_data)} 个用户的网络指标")
-    else:
-        # 加载已有的网络指标
-        print("加载已有的网络指标...")
-        with open(metrics_output, 'r', encoding='utf-8') as f:
-            metrics_data = {}
-            for line in f:
-                record = json.loads(line)
-                user_id = record["user_id"]
-                metrics = record["network_metrics"]
-                metrics_data[user_id] = metrics
-        
-        popularity_df = pd.read_csv(popularity_path)
-        popularity_df['user_id'] = popularity_df['user_id'].apply(normalize_id)
-        print(f"已加载 {len(metrics_data)} 个用户的网络指标")
-    
-    # 将指标转换为DataFrame格式并保存merged_metrics_popularity.csv
-    print("正在生成合并数据文件...")
-    metrics_df = metrics_to_dataframe(metrics_data)
-    
-    if len(metrics_df) > 0:
-        # 规范化ID并合并数据
-        metrics_df['user_id'] = metrics_df['user_id'].apply(normalize_id)
-        popularity_df['user_id'] = popularity_df['user_id'].apply(normalize_id)
-        
-        merged_df = pd.merge(metrics_df, popularity_df[['user_id', 'avg_popularity']], 
-                            on="user_id", how="inner")
-        
-        # 保存合并后的数据
-        merged_output = os.path.join(output_dir, 'merged_metrics_popularity.csv')
-        merged_df.to_csv(merged_output, index=False)
-        print(f"合并后的数据已保存到: {merged_output}")
-        print(f"合并后的数据包含 {len(merged_df)} 行")
-    else:
-        print("错误：没有有效的网络指标数据")
+        print(f"✅ 单一指标对比汇总报告: {summary_path}")
     
     end_time = datetime.now()
     duration = end_time - start_time
-    print(f"\n数据生成完成，总耗时: {duration}")
-    print(f"生成的文件:")
-    print(f"  - 网络指标: {metrics_output}")
-    print(f"  - 邻居网络信息: {ego_networks_output}")
-    print(f"  - 合并数据: {merged_output}")
-    print(f"\n现在可以使用analysis_without_abnormal.py进行相关性分析")
+    
+    print(f"\n{'='*60}")
+    print(f"分析完成！")
+    print(f"总耗时: {duration}")
+    print(f"处理了 {len(abnormal_folders)} 种配置")
+    print(f"结果保存在: {output_dir}")
+    
+    # 打印简要结果
+    print(f"\n=== 分析结果预览 ===")
+    if popularity_metric == 'both':
+        print(f"已完成双重影响力指标对比分析")
+        print(f"生成了Y1和Y2的独立报告以及对比汇总报告")
+    else:
+        metric_desc = "Y1(最新10条)" if popularity_metric == 'avg_popularity' else "Y2(总体)"
+        print(f"已完成 {metric_desc} 影响力指标分析")
 
 if __name__ == "__main__":
     main()
