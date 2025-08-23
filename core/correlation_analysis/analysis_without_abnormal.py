@@ -108,16 +108,18 @@ def load_abnormal_users_from_folder(folder_name):
         return set()
 
 def detect_network_features(merged_df):
-    """🔥 新增：自动检测数据中的网络特征，排除非分析字段"""
-    # 需要排除的字段
+    """🔥 修复版：自动检测数据中的网络特征，正确排除因变量"""
+    # 🔥 关键修复：需要排除的字段（所有非自变量字段）
     excluded_columns = {
-        'user_id',           # 用户ID
-        'center_node',       # 中心节点（与user_id重复）
-        'avg_popularity',    # 影响力（因变量）
-        'is_celebrity'       # 明星用户标识（非网络指标）
+        'user_id',              # 用户ID
+        'center_node',          # 中心节点（与user_id重复）
+        'avg_popularity',       # 🔥 Y1：最新10条微博影响力（因变量）
+        'avg_popularity_of_all', # 🔥 Y2：总体微博影响力（因变量）
+        'is_celebrity',         # 明星用户标识（非网络指标）
+        'user_category'         # 🔥 新增：用户类别（非网络指标）
     }
     
-    # 🔥 自动检测所有可分析的网络特征
+    # 🔥 自动检测所有可分析的网络特征（自变量）
     network_features = []
     for col in merged_df.columns:
         if col not in excluded_columns:
@@ -144,9 +146,9 @@ def detect_network_features(merged_df):
         if feature not in ordered_features:
             ordered_features.append(feature)
     
-    print(f"\n🔍 自动检测到 {len(ordered_features)} 个可分析的网络特征:")
+    print(f"\n🔍 自动检测到 {len(ordered_features)} 个网络特征（自变量）:")
     
-    # 🔥 新增：按类别显示特征
+    # 🔥 修复：按类别显示特征
     traditional_features = [f for f in ordered_features if f in priority_order[:6]]
     degree_features = [f for f in ordered_features if f in priority_order[6:9]]
     network_size_features = [f for f in ordered_features if f in priority_order[9:11]]
@@ -163,8 +165,62 @@ def detect_network_features(merged_df):
     
     return ordered_features
 
-def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_info):
-    """🔥 修改版：计算排除异常用户后的相关性，自动检测所有网络特征"""
+# 🔥 新增：影响力指标选择函数
+def choose_popularity_metric(merged_df):
+    """让用户选择要分析的影响力指标（因变量）"""
+    available_metrics = []
+    
+    # 检查可用的影响力指标
+    if 'avg_popularity' in merged_df.columns:
+        available_metrics.append(('avg_popularity', 'Y1: 最新10条微博转赞评平均值'))
+    
+    if 'avg_popularity_of_all' in merged_df.columns:
+        available_metrics.append(('avg_popularity_of_all', 'Y2: 总体微博转赞评平均值'))
+    
+    if len(available_metrics) == 0:
+        print("❌ 未找到任何影响力指标列")
+        return None
+    
+    if len(available_metrics) == 1:
+        metric_name, metric_desc = available_metrics[0]
+        print(f"✅ 只检测到一种影响力指标: {metric_desc}")
+        return metric_name
+    
+    # 有多个指标，让用户选择
+    print(f"\n🎯 检测到多种影响力指标，请选择要分析的目标变量（因变量）:")
+    print("=" * 60)
+    for i, (metric_name, metric_desc) in enumerate(available_metrics, 1):
+        # 显示统计信息
+        non_zero_count = (merged_df[metric_name] > 0).sum()
+        total_count = len(merged_df)
+        mean_value = merged_df[metric_name].mean()
+        max_value = merged_df[metric_name].max()
+        
+        print(f"{i}. {metric_desc}")
+        print(f"   📊 非零用户: {non_zero_count}/{total_count} ({non_zero_count/total_count*100:.1f}%)")
+        print(f"   📊 平均值: {mean_value:.2f}, 最大值: {max_value:.2f}")
+        print()
+    
+    print("3. 同时分析两种指标（生成对比报告）")
+    print("=" * 60)
+    
+    while True:
+        try:
+            choice = input("请选择 (1/2/3): ").strip()
+            if choice == '1':
+                return available_metrics[0][0]
+            elif choice == '2':
+                return available_metrics[1][0]
+            elif choice == '3':
+                return 'both'  # 特殊标识，表示分析两种指标
+            else:
+                print("请输入有效选项 (1/2/3)")
+        except KeyboardInterrupt:
+            print("\n❌ 用户取消操作")
+            return None
+
+def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_info, popularity_metric):
+    """🔥 修改版：支持选择不同的影响力指标进行相关性计算"""
     merged_df['user_id'] = merged_df['user_id'].apply(normalize_id)
     filtered_df = merged_df[~merged_df['user_id'].isin(abnormal_users)].copy()
     
@@ -175,12 +231,19 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
     if len(filtered_df) < 10:
         print(f"  - 警告: 剩余用户数过少 ({len(filtered_df)})，可能影响相关性分析的可靠性")
     
-    # 🔥 关键修改：自动检测网络特征
+    # 🔥 关键修改：自动检测网络特征（自变量）
     network_features = detect_network_features(filtered_df)
     
     if not network_features:
         print(f"  - 错误: 未检测到任何可分析的网络特征")
         return {}, len(merged_df), len(abnormal_users), len(filtered_df)
+    
+    # 🔥 新增：验证选择的影响力指标
+    if popularity_metric not in filtered_df.columns:
+        print(f"  - 错误: 选择的影响力指标 {popularity_metric} 不在数据中")
+        return {}, len(merged_df), len(abnormal_users), len(filtered_df)
+    
+    print(f"  - 使用影响力指标: {popularity_metric}")
     
     # 计算相关性
     correlations = {}
@@ -198,9 +261,9 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
         
         try:
             # 检查是否有有效数据
-            valid_mask = (~pd.isna(filtered_df[feature])) & (~pd.isna(filtered_df['avg_popularity']))
+            valid_mask = (~pd.isna(filtered_df[feature])) & (~pd.isna(filtered_df[popularity_metric]))
             valid_feature = filtered_df.loc[valid_mask, feature]
-            valid_popularity = filtered_df.loc[valid_mask, 'avg_popularity']
+            valid_popularity = filtered_df.loc[valid_mask, popularity_metric]
             
             if len(valid_feature) < 3:
                 print(f"  - 警告: 特征 {feature} 有效数据点过少 ({len(valid_feature)})")
@@ -239,10 +302,17 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
     return correlations, len(merged_df), len(abnormal_users), len(filtered_df)
 
 def save_results(correlations, original_count, excluded_count, remaining_count, 
-                folder_info, output_dir):
-    """🔥 修改版：保存分析结果，支持动态特征数量"""
+                folder_info, output_dir, popularity_metric):
+    """🔥 修改版：保存分析结果，支持不同影响力指标"""
     result_dir = os.path.join(output_dir, folder_info['folder_name'])
     ensure_dir(result_dir)
+    
+    # 🔥 新增：根据影响力指标调整文件名
+    metric_suffix = ""
+    if popularity_metric == 'avg_popularity':
+        metric_suffix = "_y1_recent10"
+    elif popularity_metric == 'avg_popularity_of_all':
+        metric_suffix = "_y2_total"
     
     # 保存详细的相关性结果到CSV
     results_data = []
@@ -256,16 +326,25 @@ def save_results(correlations, original_count, excluded_count, remaining_count,
         })
     
     results_df = pd.DataFrame(results_data)
-    csv_path = os.path.join(result_dir, 'correlation_results.csv')
+    csv_path = os.path.join(result_dir, f'correlation_results{metric_suffix}.csv')
     results_df.to_csv(csv_path, index=False)
     
     # 保存汇总报告到TXT
-    txt_path = os.path.join(result_dir, 'analysis_summary.txt')
+    txt_path = os.path.join(result_dir, f'analysis_summary{metric_suffix}.txt')
+    
+    # 🔥 新增：影响力指标描述
+    metric_descriptions = {
+        'avg_popularity': 'Y1: 最新10条微博转赞评平均值',
+        'avg_popularity_of_all': 'Y2: 总体微博转赞评平均值'
+    }
+    metric_desc = metric_descriptions.get(popularity_metric, popularity_metric)
+    
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"====== {folder_info['description']} 相关性分析结果 ======\n")
         f.write(f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"检测方法: {', '.join(folder_info['methods'])}\n")
-        f.write(f"排除比例: {folder_info['exclude_pct']}%\n\n")
+        f.write(f"排除比例: {folder_info['exclude_pct']}%\n")
+        f.write(f"影响力指标: {metric_desc}\n\n")  # 🔥 新增
         
         f.write(f"=== 数据统计 ===\n")
         f.write(f"原始用户总数: {original_count}\n")
@@ -275,7 +354,7 @@ def save_results(correlations, original_count, excluded_count, remaining_count,
         f.write(f"保留比例: {remaining_count/original_count*100:.2f}%\n\n")
         
         # 🔥 修改：动态标题，支持任意数量的特征
-        f.write(f"=== 网络特征与影响力相关性分析 (共{len(correlations)}个特征) ===\n")
+        f.write(f"=== 网络特征与{metric_desc}相关性分析 (共{len(correlations)}个特征) ===\n")
         f.write(f"{'特征名称':<35} {'Spearman相关系数':<18} {'Spearman P值':<15} {'Kendall相关系数':<17} {'Kendall P值':<15} {'显著性'}\n")
         f.write("-" * 120 + "\n")
         
@@ -296,19 +375,172 @@ def save_results(correlations, original_count, excluded_count, remaining_count,
         f.write(f"\n=== 分析说明 ===\n")
         f.write(f"1. 使用检测方法: {', '.join(folder_info['methods'])}\n")
         f.write(f"2. 排除比例: {folder_info['exclude_pct']}%\n")
-        f.write(f"3. 自动检测到 {len(correlations)} 个网络特征进行分析\n")
-        f.write(f"4. Spearman相关系数衡量单调关系，Kendall相关系数衡量序列一致性\n")
-        f.write(f"5. P值<0.05认为相关性显著\n")
-        f.write(f"6. 相关系数绝对值越大，表示相关性越强\n")
-        f.write(f"7. 已自动排除非分析字段: user_id, center_node, avg_popularity, is_celebrity\n")
+        f.write(f"3. 影响力指标: {metric_desc}\n")
+        f.write(f"4. 自动检测到 {len(correlations)} 个网络特征进行分析\n")
+        f.write(f"5. Spearman相关系数衡量单调关系，Kendall相关系数衡量序列一致性\n")
+        f.write(f"6. P值<0.05认为相关性显著\n")
+        f.write(f"7. 相关系数绝对值越大，表示相关性越强\n")
+        f.write(f"8. 已自动排除非分析字段: user_id, center_node, avg_popularity, avg_popularity_of_all, is_celebrity, user_category\n")
     
     print(f"  - 结果已保存到: {result_dir}")
     return csv_path, txt_path
 
+# 🔥 新增：双重分析功能
+def analyze_both_metrics(merged_df, abnormal_folders, output_dir):
+    """同时分析两种影响力指标并生成对比报告"""
+    
+    if 'avg_popularity' not in merged_df.columns or 'avg_popularity_of_all' not in merged_df.columns:
+        print("❌ 数据中缺少完整的双重影响力指标，无法进行对比分析")
+        return
+    
+    print(f"\n🔄 开始双重影响力指标对比分析...")
+    
+    all_results_y1 = {}
+    all_results_y2 = {}
+    
+    # 分别分析两种指标
+    for folder_name in abnormal_folders:
+        print(f"\n{'='*60}")
+        folder_info = parse_folder_info(folder_name)
+        print(f"分析配置: {folder_info['description']}")
+        
+        # 加载异常用户列表
+        abnormal_users = load_abnormal_users_from_folder(folder_name)
+        
+        # 分析Y1（最新10条）
+        print(f"  📊 分析Y1: 最新10条微博影响力...")
+        correlations_y1, original_count, excluded_count, remaining_count = calculate_correlations_without_abnormal(
+            merged_df, abnormal_users, folder_info, 'avg_popularity')
+        
+        # 分析Y2（总体）
+        print(f"  📊 分析Y2: 总体微博影响力...")
+        correlations_y2, _, _, _ = calculate_correlations_without_abnormal(
+            merged_df, abnormal_users, folder_info, 'avg_popularity_of_all')
+        
+        # 保存结果
+        save_results(correlations_y1, original_count, excluded_count, remaining_count, 
+                    folder_info, output_dir, 'avg_popularity')
+        save_results(correlations_y2, original_count, excluded_count, remaining_count, 
+                    folder_info, output_dir, 'avg_popularity_of_all')
+        
+        # 存储结果用于对比
+        all_results_y1[folder_name] = {
+            'folder_info': folder_info,
+            'correlations': correlations_y1,
+            'counts': (original_count, excluded_count, remaining_count)
+        }
+        all_results_y2[folder_name] = {
+            'folder_info': folder_info,
+            'correlations': correlations_y2,
+            'counts': (original_count, excluded_count, remaining_count)
+        }
+    
+    # 🔥 生成双重指标对比汇总报告
+    print(f"\n🔄 生成双重影响力指标对比汇总报告...")
+    
+    comparison_path = os.path.join(output_dir, 'dual_metrics_comparison_summary.txt')
+    with open(comparison_path, 'w', encoding='utf-8') as f:
+        f.write("====== 双重影响力指标相关性分析对比汇总 ======\n")
+        f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("=== 影响力指标说明 ===\n")
+        f.write("Y1 (avg_popularity): 最新10条微博转赞评平均值\n")
+        f.write("Y2 (avg_popularity_of_all): 总体微博转赞评平均值\n\n")
+        
+        # 配置概览
+        f.write("=== 分析配置概览 ===\n")
+        for i, folder_name in enumerate(abnormal_folders, 1):
+            folder_info = all_results_y1[folder_name]['folder_info']
+            f.write(f"{i}. {folder_info['short_name']}: {folder_info['description']}\n")
+        f.write("\n")
+        
+        # 获取所有特征
+        all_features = set()
+        for folder_name in abnormal_folders:
+            all_features.update(all_results_y1[folder_name]['correlations'].keys())
+        features = sorted(list(all_features))
+        
+        # Y1 vs Y2 Spearman相关系数对比
+        f.write(f"=== Y1 vs Y2 Spearman相关系数对比 (共{len(features)}个特征) ===\n")
+        
+        # Y1数据
+        f.write(f"\n--- Y1 (最新10条) Spearman相关系数 ---\n")
+        header = f"{'特征':<35} "
+        for folder_name in abnormal_folders:
+            folder_info = all_results_y1[folder_name]['folder_info']
+            header += f"{folder_info['short_name']:<15} "
+        f.write(header + "\n")
+        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        
+        for feature in features:
+            line = f"{feature:<35} "
+            for folder_name in abnormal_folders:
+                if feature in all_results_y1[folder_name]['correlations']:
+                    corr = all_results_y1[folder_name]['correlations'][feature]['spearman_corr']
+                    if pd.isna(corr):
+                        line += f"{'N/A':<15}"
+                    else:
+                        line += f"{corr:<15.4f}"
+                else:
+                    line += f"{'N/A':<15}"
+            f.write(line + "\n")
+        
+        # Y2数据
+        f.write(f"\n--- Y2 (总体) Spearman相关系数 ---\n")
+        header = f"{'特征':<35} "
+        for folder_name in abnormal_folders:
+            folder_info = all_results_y2[folder_name]['folder_info']
+            header += f"{folder_info['short_name']:<15} "
+        f.write(header + "\n")
+        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        
+        for feature in features:
+            line = f"{feature:<35} "
+            for folder_name in abnormal_folders:
+                if feature in all_results_y2[folder_name]['correlations']:
+                    corr = all_results_y2[folder_name]['correlations'][feature]['spearman_corr']
+                    if pd.isna(corr):
+                        line += f"{'N/A':<15}"
+                    else:
+                        line += f"{corr:<15.4f}"
+                else:
+                    line += f"{'N/A':<15}"
+            f.write(line + "\n")
+        
+        # Y1 vs Y2差异分析
+        f.write(f"\n--- Y1 vs Y2 相关系数差异 (Y2 - Y1) ---\n")
+        header = f"{'特征':<35} "
+        for folder_name in abnormal_folders:
+            folder_info = all_results_y1[folder_name]['folder_info']
+            header += f"{folder_info['short_name']:<15} "
+        f.write(header + "\n")
+        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        
+        for feature in features:
+            line = f"{feature:<35} "
+            for folder_name in abnormal_folders:
+                corr_y1 = all_results_y1[folder_name]['correlations'].get(feature, {}).get('spearman_corr', np.nan)
+                corr_y2 = all_results_y2[folder_name]['correlations'].get(feature, {}).get('spearman_corr', np.nan)
+                
+                if pd.isna(corr_y1) or pd.isna(corr_y2):
+                    line += f"{'N/A':<15}"
+                else:
+                    diff = corr_y2 - corr_y1
+                    line += f"{diff:<15.4f}"
+            f.write(line + "\n")
+        
+        f.write(f"\n=== 分析说明 ===\n")
+        f.write(f"1. Y1适合分析近期活跃度与网络结构的关系\n")
+        f.write(f"2. Y2适合分析整体影响力与网络结构的关系\n")
+        f.write(f"3. 正差异表示Y2相关性更强，负差异表示Y1相关性更强\n")
+        f.write(f"4. 建议重点关注差异较大的特征，可能揭示不同时间尺度下的影响机制\n")
+    
+    print(f"✅ 双重指标对比汇总报告: {comparison_path}")
+
 def main():
     """主函数"""
     start_time = datetime.now()
-    print(f"开始自适应异常用户相关性分析...")
+    print(f"开始双重影响力指标相关性分析...")
     print(f"分析时间: {start_time}")
     
     # 🔥 修改：使用新的数据路径
@@ -327,8 +559,8 @@ def main():
         print(f"加载合并数据出错: {e}")
         return
     
-    # 🔥 修改：检查必要的列（移除硬编码的网络特征检查）
-    required_columns = ['user_id', 'avg_popularity']
+    # 🔥 修改：检查必要的列
+    required_columns = ['user_id']
     
     missing_columns = [col for col in required_columns if col not in merged_df.columns]
     if missing_columns:
@@ -337,6 +569,15 @@ def main():
     
     print(f"✅ 数据格式验证通过")
     print(f"📊 数据包含列: {list(merged_df.columns)}")
+    
+    # 🔥 新增：选择影响力指标
+    print(f"\n{'='*60}")
+    print(f"选择影响力指标...")
+    popularity_metric = choose_popularity_metric(merged_df)
+    
+    if popularity_metric is None:
+        print("❌ 未选择影响力指标，程序退出")
+        return
     
     # 自动检测异常用户文件夹
     print(f"\n{'='*60}")
@@ -352,130 +593,151 @@ def main():
     output_dir = 'results/correlation_result'
     ensure_dir(output_dir)
     
-    print(f"\n{'='*60}")
-    print(f"开始分析 {len(abnormal_folders)} 种配置下的相关性...")
-    
-    all_results = {}
-    
-    # 分析每个配置
-    for folder_name in abnormal_folders:
+    # 🔥 新增：根据选择的指标执行不同的分析
+    if popularity_metric == 'both':
+        # 双重分析模式
+        analyze_both_metrics(merged_df, abnormal_folders, output_dir)
+    else:
+        # 单一指标分析模式
         print(f"\n{'='*60}")
+        print(f"开始分析 {len(abnormal_folders)} 种配置下的相关性...")
+        print(f"使用影响力指标: {popularity_metric}")
         
-        # 解析文件夹信息
-        folder_info = parse_folder_info(folder_name)
-        print(f"分析配置: {folder_info['description']}")
-        print(f"文件夹: {folder_name}")
-        print(f"{'='*60}")
+        all_results = {}
         
-        # 加载异常用户列表
-        abnormal_users = load_abnormal_users_from_folder(folder_name)
-        
-        # 计算相关性
-        print(f"  - 开始计算相关性...")
-        correlations, original_count, excluded_count, remaining_count = calculate_correlations_without_abnormal(
-            merged_df, abnormal_users, folder_info)
-        
-        # 保存结果
-        csv_path, txt_path = save_results(correlations, original_count, excluded_count, 
-                                        remaining_count, folder_info, output_dir)
-        
-        # 存储结果用于后续比较
-        all_results[folder_name] = {
-            'folder_info': folder_info,
-            'correlations': correlations,
-            'original_count': original_count,
-            'excluded_count': excluded_count,
-            'remaining_count': remaining_count
-        }
-    
-    # 🔥 修改：生成动态对比汇总报告
-    print(f"\n{'='*60}")
-    print(f"生成对比汇总报告...")
-    
-    summary_path = os.path.join(output_dir, 'comprehensive_comparison_summary.txt')
-    with open(summary_path, 'w', encoding='utf-8') as f:
-        f.write("====== 异常用户筛选相关性分析综合对比汇总 ======\n")
-        f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        
-        # 配置概览
-        f.write("=== 分析配置概览 ===\n")
-        for i, folder_name in enumerate(abnormal_folders, 1):
-            folder_info = all_results[folder_name]['folder_info']
-            f.write(f"{i}. {folder_info['short_name']}: {folder_info['description']}\n")
-        f.write("\n")
-        
-        # 数据量对比
-        f.write("=== 数据量对比 ===\n")
-        f.write(f"{'配置':<15} {'原始用户数':<12} {'排除用户数':<12} {'剩余用户数':<12} {'排除比例':<10} {'保留比例'}\n")
-        f.write("-" * 75 + "\n")
+        # 分析每个配置
         for folder_name in abnormal_folders:
-            result = all_results[folder_name]
-            folder_info = result['folder_info']
-            exclude_pct = result['excluded_count'] / result['original_count'] * 100
-            remain_pct = result['remaining_count'] / result['original_count'] * 100
+            print(f"\n{'='*60}")
             
-            f.write(f"{folder_info['short_name']:<15} {result['original_count']:<12} {result['excluded_count']:<12} "
-                   f"{result['remaining_count']:<12} {exclude_pct:<10.2f}% {remain_pct:.2f}%\n")
+            # 解析文件夹信息
+            folder_info = parse_folder_info(folder_name)
+            print(f"分析配置: {folder_info['description']}")
+            print(f"文件夹: {folder_name}")
+            print(f"{'='*60}")
+            
+            # 加载异常用户列表
+            abnormal_users = load_abnormal_users_from_folder(folder_name)
+            
+            # 计算相关性
+            print(f"  - 开始计算相关性...")
+            correlations, original_count, excluded_count, remaining_count = calculate_correlations_without_abnormal(
+                merged_df, abnormal_users, folder_info, popularity_metric)
+            
+            # 保存结果
+            csv_path, txt_path = save_results(correlations, original_count, excluded_count, 
+                                            remaining_count, folder_info, output_dir, popularity_metric)
+            
+            # 存储结果用于后续比较
+            all_results[folder_name] = {
+                'folder_info': folder_info,
+                'correlations': correlations,
+                'original_count': original_count,
+                'excluded_count': excluded_count,
+                'remaining_count': remaining_count
+            }
         
-        # 🔥 修改：动态获取所有特征进行对比
-        all_features = set()
-        for folder_name in abnormal_folders:
-            all_features.update(all_results[folder_name]['correlations'].keys())
+        # 🔥 修改：生成单一指标对比汇总报告
+        print(f"\n{'='*60}")
+        print(f"生成对比汇总报告...")
         
-        features = sorted(list(all_features))  # 排序保证一致性
+        # 文件名包含指标标识
+        metric_suffix = "_y1" if popularity_metric == 'avg_popularity' else "_y2"
+        summary_path = os.path.join(output_dir, f'comprehensive_comparison_summary{metric_suffix}.txt')
         
-        f.write(f"\n=== Spearman相关系数对比 (共{len(features)}个特征) ===\n")
-        # 构建列标题
-        header = f"{'特征':<35} "
-        for folder_name in abnormal_folders:
-            folder_info = all_results[folder_name]['folder_info']
-            header += f"{folder_info['short_name']:<15} "
-        f.write(header + "\n")
-        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+        metric_descriptions = {
+            'avg_popularity': 'Y1: 最新10条微博转赞评平均值',
+            'avg_popularity_of_all': 'Y2: 总体微博转赞评平均值'
+        }
+        metric_desc = metric_descriptions.get(popularity_metric, popularity_metric)
         
-        for feature in features:
-            line = f"{feature:<35} "
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write("====== 异常用户筛选相关性分析综合对比汇总 ======\n")
+            f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"影响力指标: {metric_desc}\n\n")
+            
+            # 其余内容与原版相同...
+            # 配置概览
+            f.write("=== 分析配置概览 ===\n")
+            for i, folder_name in enumerate(abnormal_folders, 1):
+                folder_info = all_results[folder_name]['folder_info']
+                f.write(f"{i}. {folder_info['short_name']}: {folder_info['description']}\n")
+            f.write("\n")
+            
+            # 数据量对比
+            f.write("=== 数据量对比 ===\n")
+            f.write(f"{'配置':<15} {'原始用户数':<12} {'排除用户数':<12} {'剩余用户数':<12} {'排除比例':<10} {'保留比例'}\n")
+            f.write("-" * 75 + "\n")
             for folder_name in abnormal_folders:
-                if feature in all_results[folder_name]['correlations']:
-                    corr = all_results[folder_name]['correlations'][feature]['spearman_corr']
-                    if pd.isna(corr):
-                        line += f"{'N/A':<15}"
-                    else:
-                        line += f"{corr:<15.4f}"
-                else:
-                    line += f"{'N/A':<15}"
-            f.write(line + "\n")
-        
-        f.write(f"\n=== Kendall相关系数对比 (共{len(features)}个特征) ===\n")
-        # 构建列标题
-        header = f"{'特征':<35} "
-        for folder_name in abnormal_folders:
-            folder_info = all_results[folder_name]['folder_info']
-            header += f"{folder_info['short_name']:<15} "
-        f.write(header + "\n")
-        f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
-        
-        for feature in features:
-            line = f"{feature:<35} "
+                result = all_results[folder_name]
+                folder_info = result['folder_info']
+                exclude_pct = result['excluded_count'] / result['original_count'] * 100
+                remain_pct = result['remaining_count'] / result['original_count'] * 100
+                
+                f.write(f"{folder_info['short_name']:<15} {result['original_count']:<12} {result['excluded_count']:<12} "
+                       f"{result['remaining_count']:<12} {exclude_pct:<10.2f}% {remain_pct:.2f}%\n")
+            
+            # 获取所有特征进行对比
+            all_features = set()
             for folder_name in abnormal_folders:
-                if feature in all_results[folder_name]['correlations']:
-                    corr = all_results[folder_name]['correlations'][feature]['kendall_corr']
-                    if pd.isna(corr):
-                        line += f"{'N/A':<15}"
+                all_features.update(all_results[folder_name]['correlations'].keys())
+            
+            features = sorted(list(all_features))
+            
+            f.write(f"\n=== Spearman相关系数对比 (共{len(features)}个特征) ===\n")
+            # 构建列标题
+            header = f"{'特征':<35} "
+            for folder_name in abnormal_folders:
+                folder_info = all_results[folder_name]['folder_info']
+                header += f"{folder_info['short_name']:<15} "
+            f.write(header + "\n")
+            f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+            
+            for feature in features:
+                line = f"{feature:<35} "
+                for folder_name in abnormal_folders:
+                    if feature in all_results[folder_name]['correlations']:
+                        corr = all_results[folder_name]['correlations'][feature]['spearman_corr']
+                        if pd.isna(corr):
+                            line += f"{'N/A':<15}"
+                        else:
+                            line += f"{corr:<15.4f}"
                     else:
-                        line += f"{corr:<15.4f}"
-                else:
-                    line += f"{'N/A':<15}"
-            f.write(line + "\n")
+                        line += f"{'N/A':<15}"
+                f.write(line + "\n")
+            
+            f.write(f"\n=== Kendall相关系数对比 (共{len(features)}个特征) ===\n")
+            # 构建列标题
+            header = f"{'特征':<35} "
+            for folder_name in abnormal_folders:
+                folder_info = all_results[folder_name]['folder_info']
+                header += f"{folder_info['short_name']:<15} "
+            f.write(header + "\n")
+            f.write("-" * (35 + 15 * len(abnormal_folders)) + "\n")
+            
+            for feature in features:
+                line = f"{feature:<35} "
+                for folder_name in abnormal_folders:
+                    if feature in all_results[folder_name]['correlations']:
+                        corr = all_results[folder_name]['correlations'][feature]['kendall_corr']
+                        if pd.isna(corr):
+                            line += f"{'N/A':<15}"
+                        else:
+                            line += f"{corr:<15.4f}"
+                    else:
+                        line += f"{'N/A':<15}"
+                f.write(line + "\n")
+            
+            f.write(f"\n=== 分析说明 ===\n")
+            f.write(f"1. 分析的影响力指标: {metric_desc}\n")
+            f.write(f"2. 自动检测并分析了 {len(features)} 个网络特征\n")
+            f.write(f"3. 已排除非分析字段: user_id, center_node, avg_popularity, avg_popularity_of_all, is_celebrity, user_category\n")
+            f.write(f"4. Original: 原始网络，未排除任何用户\n")
+            for folder_name in abnormal_folders:
+                folder_info = all_results[folder_name]['folder_info']
+                if folder_info['exclude_pct'] > 0:
+                    f.write(f"5. {folder_info['short_name']}: 排除前{folder_info['exclude_pct']}%异常用户\n")
         
-        f.write(f"\n=== 分析说明 ===\n")
-        f.write(f"1. 自动检测并分析了 {len(features)} 个网络特征\n")
-        f.write(f"2. 已排除非分析字段: user_id, center_node, avg_popularity, is_celebrity\n")
-        f.write(f"3. Original: 原始网络，未排除任何用户\n")
-        for folder_name in abnormal_folders:
-            folder_info = all_results[folder_name]['folder_info']
-            if folder_info['exclude_pct'] > 0:
-                f.write(f"4. {folder_info['short_name']}: 排除前{folder_info['exclude_pct']}%异常用户\n")
+        print(f"✅ 单一指标对比汇总报告: {summary_path}")
     
     end_time = datetime.now()
     duration = end_time - start_time
@@ -485,14 +747,15 @@ def main():
     print(f"总耗时: {duration}")
     print(f"处理了 {len(abnormal_folders)} 种配置")
     print(f"结果保存在: {output_dir}")
-    print(f"综合对比汇总报告: {summary_path}")
     
     # 打印简要结果
     print(f"\n=== 分析结果预览 ===")
-    for folder_name in abnormal_folders:
-        result = all_results[folder_name]
-        folder_info = result['folder_info']
-        print(f"{folder_info['short_name']}: 排除{result['excluded_count']}用户, 剩余{result['remaining_count']}用户")
+    if popularity_metric == 'both':
+        print(f"已完成双重影响力指标对比分析")
+        print(f"生成了Y1和Y2的独立报告以及对比汇总报告")
+    else:
+        metric_desc = "Y1(最新10条)" if popularity_metric == 'avg_popularity' else "Y2(总体)"
+        print(f"已完成 {metric_desc} 影响力指标分析")
 
 if __name__ == "__main__":
     main()
