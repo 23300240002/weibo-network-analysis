@@ -32,7 +32,7 @@ class AdvancedAnomalyDetector:
         print("正在加载数据...")
         
         # 🔥 修改：使用新的数据路径，兼容create3.py的输出
-        merged_data_path = 'C:/Tengfei/data/results/user_3855570307_metrics/merged_metrics_popularity.csv'
+        merged_data_path = 'C:/Tengfei/data/results/topic_孙颖莎_metrics/merged_metrics_popularity.csv'
         if not os.path.exists(merged_data_path):
             print(f"错误: 未找到文件 {merged_data_path}")
             return False
@@ -220,7 +220,7 @@ class AdvancedAnomalyDetector:
         
         # 转换为DataFrame并排序
         anomaly_df = pd.DataFrame(anomaly_scores)
-        anomaly_df = anomaly_df.sort_values('anomaly_score', ascending=False)
+        anomaly_df = self._safe_sort(anomaly_df, 'anomaly_score', ascending=False)
         
         # 按照指定比例排除用户 - 基于总用户数计算
         n_to_exclude = int(np.ceil(len(self.merged_df) * exclude_pct / 100))
@@ -232,7 +232,7 @@ class AdvancedAnomalyDetector:
         print(f"实际排除比例: {actual_exclude_pct:.2f}%")
         
         # 显示前5个异常用户示例
-        if len(abnormal_users) > 0:
+        if len(abnormal_users) > 0 and len(anomaly_df) > 0:
             print("前5个邻居质量异常用户示例:")
             top_5 = anomaly_df.head(5)
             for idx, (_, row) in enumerate(top_5.iterrows()):
@@ -241,6 +241,19 @@ class AdvancedAnomalyDetector:
                     f"邻居平均影响力: {row['avg_neighbor_popularity']:.2f}")
         
         return abnormal_users
+
+    @staticmethod
+    def _safe_sort(df, by, ascending=True):
+        """避免包含None/NaN导致的排序问题"""
+        if by not in df.columns:
+            return df
+        try:
+            return df.sort_values(by, ascending=ascending)
+        except Exception:
+            # 尝试把非数值转为数值
+            tmp = df.copy()
+            tmp[by] = pd.to_numeric(tmp[by], errors='coerce')
+            return tmp.sort_values(by, ascending=ascending)
     
     def method4_celebrity_removal(self):
         """🔥 新增方法4: 明星用户移除检测 - 直接移除所有明星用户"""
@@ -422,11 +435,20 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
                 })
             detailed_df = pd.DataFrame(detailed_info)
         
-        # 保存文件
-        abnormal_df.to_csv(f'{output_dir}/abnormal_users.csv', index=False)
-        detailed_df.to_csv(f'{output_dir}/abnormal_users_detailed.csv', index=False)
+        # 保存文件：异常用户清单与详细信息
+        abnormal_df.to_csv(f'{output_dir}/abnormal_users.csv', index=False, encoding='utf-8-sig')
+        detailed_df.to_csv(f'{output_dir}/abnormal_users_detailed.csv', index=False, encoding='utf-8-sig')
+
+        # 🔥 新增：保存“删掉后剩余正常用户全量表”（仅对 advanced_* 输出）
+        if exclude_pct > 0:
+            normal_df = detector.merged_df[~detector.merged_df['user_id'].isin(all_abnormal_users)].copy()
+            normal_path = f'{output_dir}/normal_users_after_removal.csv'
+            # 保持与原始merged一致的列和顺序
+            normal_df = normal_df[detector.merged_df.columns.tolist()]
+            normal_df.to_csv(normal_path, index=False, encoding='utf-8-sig')
+            print(f"  - 正常用户全量表已保存: {normal_path}（{len(normal_df)} 行，{normal_df.shape[1]} 列）")
         
-        # 🔥 修改：生成报告，包含方法4信息
+        # 🔥 修改：生成报告，包含方法4信息和新增的正常用户全量表说明
         with open(f'{output_dir}/detection_report.txt', 'w', encoding='utf-8') as f:
             if exclude_pct == 0:
                 f.write("=== 原始网络分析报告 ===\n\n")
@@ -442,6 +464,12 @@ def save_batch_results(detector, all_results, methods, output_base_dir):
             f.write(f"总用户数: {len(detector.merged_df)}\n")
             f.write(f"检测到的异常用户总数: {len(all_abnormal_users)}\n")
             f.write(f"实际排除比例: {len(all_abnormal_users)/len(detector.merged_df)*100:.2f}%\n\n")
+            
+            if exclude_pct > 0:
+                # 新增说明
+                f.write(f"=== 删掉后正常用户表 ===\n")
+                f.write(f"文件: normal_users_after_removal.csv\n")
+                f.write(f"说明: 删掉异常用户后的剩余用户全量数据，列与原始 merged_metrics_popularity.csv 保持一致\n\n")
             
             if exclude_pct > 0:
                 for method_name, users in method_results.items():

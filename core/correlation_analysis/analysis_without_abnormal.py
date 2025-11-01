@@ -220,7 +220,7 @@ def choose_popularity_metric(merged_df):
             return None
 
 def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_info, popularity_metric):
-    """🔥 修改版：支持选择不同的影响力指标进行相关性计算"""
+    """🔥 修改版：支持选择不同的影响力指标进行相关性计算，增加常数检测"""
     merged_df['user_id'] = merged_df['user_id'].apply(normalize_id)
     filtered_df = merged_df[~merged_df['user_id'].isin(abnormal_users)].copy()
     
@@ -231,22 +231,31 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
     if len(filtered_df) < 10:
         print(f"  - 警告: 剩余用户数过少 ({len(filtered_df)})，可能影响相关性分析的可靠性")
     
-    # 🔥 关键修改：自动检测网络特征（自变量）
+    # 自动检测网络特征（自变量）
     network_features = detect_network_features(filtered_df)
     
     if not network_features:
         print(f"  - 错误: 未检测到任何可分析的网络特征")
         return {}, len(merged_df), len(abnormal_users), len(filtered_df)
     
-    # 🔥 新增：验证选择的影响力指标
+    # 验证选择的影响力指标
     if popularity_metric not in filtered_df.columns:
         print(f"  - 错误: 选择的影响力指标 {popularity_metric} 不在数据中")
         return {}, len(merged_df), len(abnormal_users), len(filtered_df)
     
     print(f"  - 使用影响力指标: {popularity_metric}")
     
+    # 🔥 新增：检查因变量的变异性
+    valid_popularity = filtered_df[popularity_metric].dropna()
+    if len(valid_popularity.unique()) <= 1:
+        print(f"  - ⚠️ 警告: 影响力指标 {popularity_metric} 在剩余用户中缺乏变异性")
+        print(f"  - 唯一值数量: {len(valid_popularity.unique())}")
+        print(f"  - 所有用户将返回NaN相关系数")
+    
     # 计算相关性
     correlations = {}
+    constant_features = []  # 记录常数特征
+    valid_correlations = 0  # 记录有效相关性数量
     
     for feature in network_features:
         if feature not in filtered_df.columns:
@@ -275,20 +284,81 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
                 }
                 continue
             
+            # 🔥 新增：检查特征的变异性
+            unique_feature_values = len(valid_feature.unique())
+            unique_popularity_values = len(valid_popularity.unique())
+            
+            if unique_feature_values <= 1:
+                print(f"  - ⚠️ {feature}: 特征值无变异性 (唯一值数={unique_feature_values})")
+                constant_features.append(feature)
+                correlations[feature] = {
+                    'spearman_corr': np.nan,
+                    'spearman_p': np.nan,
+                    'kendall_corr': np.nan,
+                    'kendall_p': np.nan
+                }
+                continue
+            
+            if unique_popularity_values <= 1:
+                print(f"  - ⚠️ {feature}: 影响力指标无变异性 (唯一值数={unique_popularity_values})")
+                correlations[feature] = {
+                    'spearman_corr': np.nan,
+                    'spearman_p': np.nan,
+                    'kendall_corr': np.nan,
+                    'kendall_p': np.nan
+                }
+                continue
+            
+            # 🔥 新增：额外的变异性检查
+            feature_std = valid_feature.std()
+            popularity_std = valid_popularity.std()
+            
+            if feature_std == 0:
+                print(f"  - ⚠️ {feature}: 特征标准差为0，无法计算相关性")
+                constant_features.append(feature)
+                correlations[feature] = {
+                    'spearman_corr': np.nan,
+                    'spearman_p': np.nan,
+                    'kendall_corr': np.nan,
+                    'kendall_p': np.nan
+                }
+                continue
+            
+            if popularity_std == 0:
+                print(f"  - ⚠️ {feature}: 影响力指标标准差为0，无法计算相关性")
+                correlations[feature] = {
+                    'spearman_corr': np.nan,
+                    'spearman_p': np.nan,
+                    'kendall_corr': np.nan,
+                    'kendall_p': np.nan
+                }
+                continue
+            
             # 计算Spearman相关系数
-            spearman_corr, spearman_p = stats.spearmanr(valid_feature, valid_popularity)
+            with np.errstate(all='ignore'):  # 抑制numpy警告
+                spearman_corr, spearman_p = stats.spearmanr(valid_feature, valid_popularity)
             
             # 计算Kendall相关系数
-            kendall_corr, kendall_p = stats.kendalltau(valid_feature, valid_popularity)
+            with np.errstate(all='ignore'):  # 抑制numpy警告
+                kendall_corr, kendall_p = stats.kendalltau(valid_feature, valid_popularity)
+            
+            # 检查结果是否有效
+            if np.isnan(spearman_corr) and np.isnan(kendall_corr):
+                print(f"  - ⚠️ {feature}: 相关系数计算结果为NaN")
+            else:
+                valid_correlations += 1
             
             correlations[feature] = {
-                'spearman_corr': spearman_corr,
-                'spearman_p': spearman_p,
-                'kendall_corr': kendall_corr,
-                'kendall_p': kendall_p
+                'spearman_corr': spearman_corr if not np.isnan(spearman_corr) else np.nan,
+                'spearman_p': spearman_p if not np.isnan(spearman_p) else np.nan,
+                'kendall_corr': kendall_corr if not np.isnan(kendall_corr) else np.nan,
+                'kendall_p': kendall_p if not np.isnan(kendall_p) else np.nan
             }
             
-            print(f"  - {feature}: Spearman={spearman_corr:.4f}(p={spearman_p:.4f}), Kendall={kendall_corr:.4f}(p={kendall_p:.4f})")
+            if not np.isnan(spearman_corr) and not np.isnan(kendall_corr):
+                print(f"  - {feature}: Spearman={spearman_corr:.4f}(p={spearman_p:.4f}), Kendall={kendall_corr:.4f}(p={kendall_p:.4f})")
+            else:
+                print(f"  - {feature}: Spearman={spearman_corr:.4f}(p={spearman_p:.4f}), Kendall={kendall_corr:.4f}(p={kendall_p:.4f}) [警告: 包含NaN]")
             
         except Exception as e:
             print(f"  - 计算 {feature} 相关性时出错: {e}")
@@ -298,6 +368,24 @@ def calculate_correlations_without_abnormal(merged_df, abnormal_users, folder_in
                 'kendall_corr': np.nan,
                 'kendall_p': np.nan
             }
+    
+    # 🔥 新增：总结分析结果
+    print(f"\n  📊 相关性分析总结:")
+    print(f"     总特征数: {len(network_features)}")
+    print(f"     常数特征数: {len(constant_features)}")
+    print(f"     有效相关性数: {valid_correlations}")
+    print(f"     失效比例: {(len(network_features)-valid_correlations)/len(network_features)*100:.1f}%")
+    
+    if constant_features:
+        print(f"  ⚠️ 常数特征列表: {', '.join(constant_features)}")
+        print(f"  💡 原因：排除异常用户后，剩余用户在这些特征上高度同质化")
+    
+    if valid_correlations == 0:
+        print(f"  🚨 警告：所有特征的相关性计算都失败")
+        print(f"  💡 建议：降低排除比例或检查数据质量")
+    elif valid_correlations < len(network_features) * 0.5:
+        print(f"  ⚠️ 警告：超过50%的特征无法计算有效相关性")
+        print(f"  💡 建议：考虑降低排除比例")
     
     return correlations, len(merged_df), len(abnormal_users), len(filtered_df)
 
@@ -544,7 +632,7 @@ def main():
     print(f"分析时间: {start_time}")
     
     # 🔥 修改：使用新的数据路径
-    merged_data_path = 'C:/Tengfei/data/results/user_3855570307_metrics/merged_metrics_popularity.csv'
+    merged_data_path = 'C:/Tengfei/data/results/topic_孙颖莎_metrics/merged_metrics_popularity.csv'
     
     if not os.path.exists(merged_data_path):
         print(f"错误: 未找到合并数据文件 {merged_data_path}")

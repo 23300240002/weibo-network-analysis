@@ -8,7 +8,7 @@ from datetime import datetime
 import re
 
 # 🎯 配置：与fetch3.py保持一致的参数
-TARGET_NETWORK_PATH = 'C:/Tengfei/data/data/domain_network3/user_3855570307'
+TARGET_NETWORK_PATH = 'C:/Tengfei/data/data/topic_networks/topic_孙颖莎'
 COOKIE_PATH = 'C:/Tengfei/data/crawler/crawler_for_weibo_fans-master/cookie.json'
 
 # 速度参数（与fetch3.py保持一致）

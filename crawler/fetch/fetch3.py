@@ -35,7 +35,7 @@ CONSECUTIVE_ZERO_FANS_THRESHOLD = 3
 MAX_POSTS_FOR_POPULARITY = 10
 
 # ===== 配置部分：修改这里的用户ID =====
-TARGET_USER_ID = "3855570307"
+TARGET_USER_ID = "7065104667" # 原神微博
 # =========================================
 
 # 全局变量

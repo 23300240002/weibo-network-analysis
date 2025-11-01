@@ -262,20 +262,31 @@ def bidirectional_bfs(G, start_node, radius):
     return distances
 
 def calculate_global_degrees(G, center_node):
-    """计算用户在全图中的出度和入度"""
+    """🔥 修复版：计算用户在全图中的出度和入度"""
     try:
-        # 出度：该用户指向多少其他用户
-        out_degree = G.out_degree(center_node) if G.has_node(center_node) else 0
+        # 确保节点ID类型一致
+        center_node_str = normalize_id(center_node)
         
-        # 入度：多少其他用户指向该用户
-        in_degree = G.in_degree(center_node) if G.has_node(center_node) else 0
+        # 检查节点是否在图中
+        if not G.has_node(center_node_str):
+            print(f"    ⚠️ 节点 {center_node_str} 不在图中")
+            return 0, 0, 0
+        
+        # 🔥 关键修复：EasyGraph返回字典，需要获取指定节点的度数
+        out_degree_dict = G.out_degree(center_node_str)
+        in_degree_dict = G.in_degree(center_node_str)
+        
+        # 从字典中获取该节点的度数值
+        out_degree = out_degree_dict if isinstance(out_degree_dict, int) else out_degree_dict.get(center_node_str, 0)
+        in_degree = in_degree_dict if isinstance(in_degree_dict, int) else in_degree_dict.get(center_node_str, 0)
         
         # 总度数
         total_degree = out_degree + in_degree
         
         return out_degree, in_degree, total_degree
+        
     except Exception as e:
-        print(f"    ⚠️ 计算全图度数失败: {e}")
+        print(f"    ❌ 计算全图度数失败: {e}")
         return 0, 0, 0
 
 def calculate_spectral_radius(G):
@@ -675,10 +686,10 @@ def main():
         print(f"✅ 同时记录：出度、入度、总度数、二跳网络节点数、二跳网络边数、是否明星用户、用户类别")
         
         # 设置路径
-        base_dir = 'C:/Tengfei/data/data/domain_network3/user_3855570307'
+        base_dir = 'C:/Tengfei/data/data/topic_networks/topic_孙颖莎'
         edges_path = os.path.join(base_dir, 'edges.csv')
         popularity_path = os.path.join(base_dir, 'popularity.csv')
-        output_dir = f'C:/Tengfei/data/results/user_3855570307_metrics'
+        output_dir = f'C:/Tengfei/data/results/topic_孙颖莎_metrics'
         metrics_output = os.path.join(output_dir, 'network_metrics.jsonl')
         ego_networks_output = os.path.join(output_dir, 'ego_networks_info.jsonl')
         
